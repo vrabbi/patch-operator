@@ -1,0 +1,94 @@
+# How a kro ResourceGraphDefinition emits a contributor.
+#
+# The same integration as Crossplane: the Instance owns the ResourcePatch via
+# ownerReferences, so deleting the Instance withdraws only that Instance's fields
+# from the shared object (DESIGN.md 6.1, A.2).
+#
+# This is the write-side complement to kro's externalRef. externalRef lets an RGD
+# READ a shared resource but never create, update or delete it; a ResourcePatch
+# lets an Instance CONTRIBUTE to one while the operator reference-counts the
+# contributors (DESIGN.md 2). The two compose: use externalRef to read fields off
+# the shared object, ResourcePatch to write your slice of it.
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: app-with-shared-ingress
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: App
+    spec:
+      name: string
+      tenant: string
+      hostname: string
+      port: integer | default=80
+    status:
+      ingressReady: ${ingressContribution.status.conditions[?(@.type=="Ready")].status}
+
+  resources:
+    - id: service
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${schema.spec.name}
+        spec:
+          selector:
+            app: ${schema.spec.name}
+          ports:
+            - port: ${schema.spec.port}
+
+    - id: ingressContribution
+      # Gate downstream resources on the contribution actually landing. Ready is
+      # False while a field conflict is unresolved, so nothing downstream proceeds
+      # on a half-applied shared object.
+      readyWhen:
+        - ${ingressContribution.status.conditions.exists(c, c.type == "Ready" && c.status == "True")}
+      template:
+        apiVersion: terasky.com/v1alpha1
+        kind: ResourcePatch
+        metadata:
+          name: ${schema.spec.name}-ingress-rule
+        spec:
+          target:
+            mode: Single
+            apiVersion: networking.k8s.io/v1
+            kind: Ingress
+            name: shared-ingress
+            namespace: platform
+          lifecycle:
+            onMissing: Create
+            onRelease: Revert
+            adoptExisting: true
+          apply:
+            mode: ClientSideApply
+            conflictPolicy: Fail
+          priority: 100
+          serviceAccountRef:
+            name: ${schema.spec.tenant}-patcher
+          base:
+            apiVersion: networking.k8s.io/v1
+            kind: Ingress
+            metadata:
+              name: shared-ingress
+              namespace: platform
+            spec:
+              ingressClassName: nginx
+          patch:
+            type: StrategicMerge
+            mergeKeys:
+              - path: spec.rules
+                key: host
+            value:
+              spec:
+                rules:
+                  - host: ${schema.spec.hostname}
+                    http:
+                      paths:
+                        - path: /
+                          pathType: Prefix
+                          backend:
+                            service:
+                              name: ${schema.spec.name}
+                              port:
+                                number: ${schema.spec.port}

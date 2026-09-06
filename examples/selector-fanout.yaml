@@ -1,0 +1,56 @@
+# Selector mode: patch every matching object.
+#
+# Selector mode is patch-only. onMissing: Create is rejected at admission --
+# there is no single object to create -- and so is onRelease: Delete, since a
+# selector-matched object was by definition not created by this contributor.
+#
+# Authorization is stricter here than in Single mode: the matched names are not
+# known at admission, so the SubjectAccessReview is issued against the GVR and
+# namespace with an empty resource name, asking "may this principal patch ANY
+# NetworkPolicy in this namespace?" (DESIGN.md 7.1).
+#
+# maxTargets caps the blast radius. Exceeding it fails the contributor rather
+# than silently truncating the match set.
+apiVersion: terasky.com/v1alpha1
+kind: ResourcePatch
+metadata:
+  name: observability-scrape-peer
+  namespace: observability
+spec:
+  target:
+    mode: Selector
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    selector:
+      matchLabels:
+        terasky.com/allow-scrape: "true"
+    namespaceSelector:
+      matchLabels:
+        env: prod
+    maxTargets: 50
+
+  lifecycle:
+    onMissing: Wait
+    onRelease: Revert
+
+  apply:
+    mode: ServerSideApply
+    conflictPolicy: Fail
+
+  priority: 200
+
+  serviceAccountRef:
+    name: observability-patcher
+
+  patch:
+    type: StrategicMerge
+    value:
+      spec:
+        ingress:
+          - from:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: observability
+            ports:
+              - protocol: TCP
+                port: 9090

@@ -1,0 +1,68 @@
+# Creator contributor.
+#
+# Owns the create-on-missing and delete-on-last-release lifecycle for the shared
+# Ingress, and contributes one rule of its own. Only this contributor may ever
+# delete the target, because only it created it (DESIGN.md 6.2).
+#
+# Uses ClientSideApply because Ingress.spec.rules is an atomic list: it carries no
+# listMapKey, so under server-side apply a single field manager would own the whole
+# list and no second contributor could add a rule (DESIGN.md 5.2, A.3).
+apiVersion: terasky.com/v1alpha1
+kind: ResourcePatch
+metadata:
+  name: team-a-ingress-rule
+  namespace: team-a
+spec:
+  target:
+    mode: Single
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    name: shared-ingress
+    namespace: platform
+
+  lifecycle:
+    onMissing: Create
+    onRelease: Revert
+    adoptExisting: true
+    baseReconcile: CreateOnly
+
+  apply:
+    mode: ClientSideApply
+    conflictPolicy: Fail
+
+  priority: 100
+
+  serviceAccountRef:
+    name: team-a-patcher
+
+  # Seed manifest. Written once, at creation, and never re-asserted, so it can
+  # never claw back a field a contributor sets later.
+  base:
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: shared-ingress
+      namespace: platform
+      annotations:
+        nginx.ingress.kubernetes.io/rewrite-target: /
+    spec:
+      ingressClassName: nginx
+
+  patch:
+    type: StrategicMerge
+    mergeKeys:
+      - path: spec.rules
+        key: host
+    value:
+      spec:
+        rules:
+          - host: team-a.example.com
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: team-a
+                      port:
+                        number: 80

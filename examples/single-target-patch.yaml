@@ -1,0 +1,54 @@
+# Patch-only contributor against the same shared Ingress.
+#
+# Carries no base and never creates the target: onMissing: Wait parks it until
+# some other contributor has created the object. It cannot delete the target
+# either -- onRelease: Delete is rejected at admission when combined with
+# onMissing: Wait, and the runtime check in DESIGN.md 6.2 stands independently.
+#
+# When this contributor is deleted, only its own rule is withdrawn. The Ingress
+# and every other contributor's rules are untouched -- including when the
+# creating contributor left first (DESIGN.md A.2).
+apiVersion: terasky.com/v1alpha1
+kind: ResourcePatch
+metadata:
+  name: team-b-ingress-rule
+  namespace: team-b
+spec:
+  target:
+    mode: Single
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    name: shared-ingress
+    namespace: platform
+
+  lifecycle:
+    onMissing: Wait
+    onRelease: Revert
+
+  apply:
+    mode: ClientSideApply
+    conflictPolicy: Fail
+
+  priority: 100
+
+  serviceAccountRef:
+    name: team-b-patcher
+
+  patch:
+    type: StrategicMerge
+    mergeKeys:
+      - path: spec.rules
+        key: host
+    value:
+      spec:
+        rules:
+          - host: team-b.example.com
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: team-b
+                      port:
+                        number: 80
