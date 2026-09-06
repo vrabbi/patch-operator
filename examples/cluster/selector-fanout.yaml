@@ -1,4 +1,8 @@
-# Selector mode: patch every matching object.
+# Selector mode: patch every matching object -- CLUSTER-SCOPED.
+#
+# This was always the cluster kind: it uses namespaceSelector, which a namespaced
+# ResourcePatch may not set at all (DESIGN.md 3.2). Namespaced selector mode is
+# legal, but its fan-out is confined to the contributor's own namespace.
 #
 # Selector mode is patch-only. onMissing: Create is rejected at admission --
 # there is no single object to create -- and so is onRelease: Delete, since a
@@ -12,10 +16,9 @@
 # maxTargets caps the blast radius. Exceeding it fails the contributor rather
 # than silently truncating the match set.
 apiVersion: terasky.com/v1alpha1
-kind: ResourcePatch
+kind: ClusterResourcePatch
 metadata:
   name: observability-scrape-peer
-  namespace: observability
 spec:
   target:
     mode: Selector
@@ -41,6 +44,7 @@ spec:
 
   serviceAccountRef:
     name: observability-patcher
+    namespace: observability
 
   patch:
     type: StrategicMerge

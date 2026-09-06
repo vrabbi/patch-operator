@@ -3,6 +3,10 @@
 **Status:** pre-alpha, design only. No implementation yet.
 **API group / version:** `terasky.com/v1alpha1`
 
+Four CRDs in two scope-matched pairs, mirroring `Role`/`ClusterRole`: `ResourcePatch` +
+`SharedResource` (namespaced, confined to one namespace) and `ClusterResourcePatch` +
+`ClusterSharedResource` (cluster-scoped, cross-namespace). See §3.5.
+
 ---
 
 ## 1. Problem & non-goals
@@ -30,17 +34,25 @@ fields must disappear when that contributor does — without disturbing anyone e
 
 **`ownerReferences` are the natural reach for reference counting, and they fall short.** Kubernetes
 garbage collection genuinely reference-counts: a dependent with several owners is deleted only when
-*all* owners are gone. But:
+*all* owners are gone.
 
-- A namespaced dependent's owners must live in the **same namespace**. A shared object in `platform`
-  cannot be owned by contributors in `team-a` and `team-b`.
-- A **cluster-scoped** dependent cannot be owned by a namespaced object at all.
-- GC is delete-or-don't. There is no "remove my fields and leave the object" semantic, which is what
-  a patch-only contributor actually needs.
-- GC deletion is unconditional once the last owner goes, so it silently overrides any policy the
-  contributor expressed.
+How far short depends on the case, and it is worth being precise rather than dismissing the
+mechanism wholesale:
 
-So reference counting has to be explicit, in an object the operator controls.
+- **Cross-namespace contribution rules it out entirely.** A namespaced dependent's owners must live
+  in the same namespace, so a shared object in `platform` cannot be owned by contributors in `team-a`
+  and `team-b`. A cluster-scoped dependent cannot be owned by a namespaced object at all.
+- **Same-namespace contribution is the case where GC would actually work.** Contributors, target and
+  tracker co-located in one namespace is exactly the shape GC handles — and it is precisely the shape
+  of this design's namespaced pair (§3.5). The objection above does not apply there.
+- **But GC is delete-or-don't, in both cases.** There is no "remove my fields and leave the object"
+  semantic, which is what a patch-only contributor actually needs.
+- **And GC deletion is unconditional** once the last owner goes, silently overriding whatever policy
+  the contributor expressed.
+
+So reference counting has to be explicit, in an object the operator controls — for the
+cross-namespace case because GC cannot express it, and for the same-namespace case because GC would
+express it *wrongly*. §6.3 returns to this once the lifecycle policies are defined.
 
 **Server-side apply solves the merging half — and only that half.** SSA's `managedFields` is exactly
 the right model for multi-writer field ownership: each field manager owns the fields it applies,
@@ -99,31 +111,37 @@ Sources:
 
 ## 3. API
 
-Two CRDs, and the split between them is the central design decision.
+Four CRDs, in two scope-matched pairs. Two design decisions carry most of the weight: the split
+between a **contributor** CRD and a **tracker** CRD (§4.1), and the split between a **namespaced**
+and a **cluster-scoped** pair (§3.5).
 
 ### 3.1 `ResourcePatch` (namespaced) — the contributor
 
-One per contributing instantiation. **This is the only CRD users write.** A Crossplane Composition or
-a kro RGD emits one of these; the XR/Instance owns it via `ownerReferences` in the normal way.
+One per contributing instantiation. A Crossplane Composition or a kro RGD emits one of these; the
+XR/Instance owns it via `ownerReferences` in the normal way.
+
+**A `ResourcePatch` can only ever touch objects in its own namespace.** That is a structural
+property, not a policy check — see §7.0, where it does most of the multi-tenancy work.
 
 ```yaml
 apiVersion: terasky.com/v1alpha1
 kind: ResourcePatch
 metadata:
-  name: team-a-ingress-rule
+  name: checkout-ingress-rule
   namespace: team-a
 spec:
   target:
     mode: Single                        # Single | Selector
     apiVersion: networking.k8s.io/v1
-    kind: Ingress
+    kind: Ingress                       # must be a namespaced kind
     # --- Single mode ---
-    name: shared-ingress
-    namespace: platform                 # omit for cluster-scoped kinds
+    name: team-a-shared-ingress
+    namespace: team-a                   # optional; defaults to .metadata.namespace,
+                                        # and a mismatch is rejected at admission
     # --- Selector mode ---
-    # selector:            { matchLabels: { tier: frontend } }
-    # namespaceSelector:   { matchLabels: { env: prod } }
-    # maxTargets:          50
+    # selector:   { matchLabels: { tier: frontend } }
+    # maxTargets: 50
+    # (namespaceSelector is forbidden here -- see 3.2)
 
   lifecycle:
     onMissing: Create                   # Fail | Wait | Create
@@ -138,16 +156,16 @@ spec:
 
   priority: 100
 
-  serviceAccountRef:                    # optional but recommended; see §7
-    name: team-a-patcher
-    namespace: team-a                   # defaults to .metadata.namespace
+  serviceAccountRef:                    # optional but recommended; see 7.3
+    name: team-a-patcher                # always in .metadata.namespace;
+                                        # a namespace field here is rejected
 
   base:                                 # only consulted when onMissing: Create
     apiVersion: networking.k8s.io/v1
     kind: Ingress
     metadata:
-      name: shared-ingress
-      namespace: platform
+      name: team-a-shared-ingress
+      namespace: team-a
     spec:
       ingressClassName: nginx
 
@@ -156,17 +174,17 @@ spec:
     value:
       spec:
         rules:
-          - host: team-a.example.com
+          - host: checkout.team-a.example.com
             http:
               paths:
                 - path: /
                   pathType: Prefix
                   backend:
-                    service: { name: team-a, port: { number: 80 } }
+                    service: { name: checkout, port: { number: 80 } }
     # For type: JSON6902 use `ops:` instead of `value:`
     # ops:
     #   - { op: add, path: /spec/rules/-, value: {...} }
-    mergeKeys:                          # ClientSideApply only; see §5.2
+    mergeKeys:                          # ClientSideApply only; see 5.2
       - path: spec.rules
         key: host
 
@@ -175,10 +193,11 @@ status:
     - type: Ready
       status: "True"
   observedTargets:
-    - { apiVersion: networking.k8s.io/v1, kind: Ingress, name: shared-ingress,
-        namespace: platform, uid: 8f3c..., state: Applied }
+    - { apiVersion: networking.k8s.io/v1, kind: Ingress, name: team-a-shared-ingress,
+        namespace: team-a, uid: 8f3c..., state: Applied }
   sharedResourceRefs:
-    - ingress.networking.k8s.io-platform-shared-ingress-a1b2c3
+    - { kind: SharedResource, namespace: team-a,
+        name: ingress.networking.k8s.io-team-a-shared-ingress-a1b2c3 }
   appliedGeneration: 4
 ```
 
@@ -213,65 +232,149 @@ there is no single object to create, and "create N objects matching a selector" 
 `onRelease: Delete` is likewise rejected — a selector-matched object was by definition not created by
 this contributor.
 
-### 3.2 `SharedResource` (cluster-scoped) — the tracker
+### 3.2 `ClusterResourcePatch` (cluster-scoped) — the cross-namespace contributor
+
+**Identical spec to `ResourcePatch`.** Same `target`, `lifecycle`, `apply`, `priority`,
+`serviceAccountRef`, `base` and `patch` — this is one API with two reaches, not two APIs. Everything
+in §3.1's field notes applies unchanged.
+
+The differences are entirely in what the target may be:
+
+```yaml
+apiVersion: terasky.com/v1alpha1
+kind: ClusterResourcePatch
+metadata:
+  name: team-a-platform-ingress-rule     # cluster-scoped: no namespace
+spec:
+  target:
+    mode: Single
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    name: shared-ingress
+    namespace: platform                  # required for namespaced kinds; a different
+                                         # namespace than the contributors' -- the point
+    # For a cluster-scoped kind (ClusterRole, StorageClass, ...) omit `namespace`.
+    # Selector mode may additionally use:
+    # namespaceSelector: { matchLabels: { env: prod } }
+  lifecycle: { onMissing: Create, onRelease: Revert }
+  apply:     { mode: ClientSideApply, conflictPolicy: Fail }
+  priority: 100
+  serviceAccountRef:
+    name: team-a-patcher
+    namespace: team-a                    # may be cross-namespace, gated by the
+                                         # `impersonate` SAR in 7.3
+  # base:, patch: exactly as in 3.1
+```
+
+#### Admission validation, by variant
+
+| | `ResourcePatch` | `ClusterResourcePatch` |
+|---|---|---|
+| **target kind** | must be a **namespaced** kind (checked via RESTMapper) | namespaced *or* cluster-scoped |
+| **`target.namespace`** | optional; defaults to `.metadata.namespace`; **any other value is rejected** | required for namespaced kinds, forbidden for cluster-scoped ones |
+| **`namespaceSelector`** | forbidden | allowed |
+| **`serviceAccountRef.namespace`** | forbidden — always the CR's own namespace | allowed; gated by the `impersonate` SAR |
+| **`maxTargets`** | a guard rail; the namespace already bounds the fan-out | the real blast-radius control |
+| **Tracked by** | `SharedResource` in that namespace | `ClusterSharedResource` |
+| **Typical RBAC grant** | tenant namespaces, freely | platform team only (§7.0) |
+
+The namespaced constraints are enforced at admission *and* re-checked at reconcile, so a
+`ResourcePatch` cannot escape its namespace even if its spec were mutated by a path that bypassed the
+webhook.
+
+### 3.3 `SharedResource` (namespaced) — the tracker
 
 **Operator-owned. Users do not create these** (whether they *may* pre-declare one is a roadmap
-question, §10). One per distinct target object, named deterministically from the target's GVK,
-namespace and name — sanitised, with a hash suffix to stay inside DNS-1123 and 253 characters.
-
-Cluster-scoped for two reasons: the target may itself be cluster-scoped, and the contributors may
-live in several different namespaces. There is no namespace that is correct for it.
+question, §10). One per distinct target object, living **in the target's namespace** — which, for
+this variant, is also every contributor's namespace. Named deterministically from the target's GVK
+and name, sanitised, with a hash suffix to stay inside DNS-1123 and 253 characters.
 
 ```yaml
 apiVersion: terasky.com/v1alpha1
 kind: SharedResource
 metadata:
-  name: ingress.networking.k8s.io-platform-shared-ingress-a1b2c3
+  name: ingress.networking.k8s.io-team-a-shared-ingress-a1b2c3
+  namespace: team-a
   finalizers: [terasky.com/shared-resource]
 spec:
   targetRef:
     apiVersion: networking.k8s.io/v1
     kind: Ingress
-    name: shared-ingress
-    namespace: platform
+    name: team-a-shared-ingress
+    # namespace is implicit: .metadata.namespace
 status:
-  phase: Applied                        # Waiting | Applied | Conflicted | Releasing
+  phase: Applied                        # Waiting | Applied | Conflicted | Releasing | Promoting
+  promotedTo:                           # set only while/after promoting (see 6.3)
+    name: ""                            # the ClusterSharedResource that took over
   createdByOperator: true
-  creatorPatchRef: { namespace: team-a, name: team-a-ingress-rule, uid: 1111-... }
+  creatorPatchRef: { kind: ResourcePatch, namespace: team-a, name: checkout-ingress-rule, uid: 1111-... }
   observedBaseHash: sha256:...
   observedTargetUID: 8f3c-...
   observedResourceVersion: "148213"
   contributors:
-    - patchRef: { namespace: team-a, name: team-a-ingress-rule, uid: 1111-... }
+    - patchRef: { kind: ResourcePatch, namespace: team-a, name: checkout-ingress-rule, uid: 1111-... }
       observedGeneration: 4
       priority: 100
-      fieldManager: patch-operator/team-a/team-a-ingress-rule
+      fieldManager: patch-operator/team-a/checkout-ingress-rule
       state: Applied                    # Applied | Superseded | Conflicted | Releasing
       lastAppliedHash: sha256:...
       ownedPaths:                       # ClientSideApply bookkeeping only
-        - spec.rules[host=team-a.example.com]
+        - spec.rules[host=checkout.team-a.example.com]
       priorValues: {}                   # ClientSideApply: original values, for restore-on-revert
   conflicts:
     - fieldPath: spec.rules
-      claimants: [team-a/team-a-ingress-rule, team-b/team-b-ingress-rule]
-      holder: team-a/team-a-ingress-rule
+      claimants: [team-a/checkout-ingress-rule, team-a/search-ingress-rule]
+      holder: team-a/checkout-ingress-rule
 ```
 
 `status.contributors` is the reference count. It is derived state — rebuilt on every reconcile from a
-live list of `ResourcePatch`es — so a lost update or a missed watch event self-heals rather than
+live list of contributors — so a lost update or a missed watch event self-heals rather than
 corrupting the count.
 
----
+`patchRef` and `creatorPatchRef` carry a `kind`, because after a promotion (§6.3) a single tracker
+holds a mix of `ResourcePatch` and `ClusterResourcePatch` contributors.
+
+### 3.4 `ClusterSharedResource` (cluster-scoped) — the tracker for everything else
+
+Identical status shape to `SharedResource`, with `spec.targetRef.namespace` explicit (or absent for a
+cluster-scoped target). It tracks:
+
+- every cluster-scoped target, and
+- every namespaced target that has at least one `ClusterResourcePatch` contributor.
+
+It has no `promotedTo` field: promotion is one-way, and a `ClusterSharedResource` is never demoted
+(§6.3).
+
+### 3.5 Scope rules and tracker selection
+
+| CRD | Scope | May target | Contributors live | Tracked by |
+|---|---|---|---|---|
+| `ResourcePatch` | namespaced | namespaced kinds, **its own namespace only** | all in that one namespace | `SharedResource` in that namespace |
+| `ClusterResourcePatch` | cluster | any namespace, and cluster-scoped kinds | anywhere | `ClusterSharedResource` |
+
+**Exactly one tracker owns a target.** The single-writer invariant (§4.1) is what the whole
+architecture rests on, and the scope split must not weaken it. The tracker for a given target is
+therefore determined by a rule, not by whichever controller got there first:
+
+1. **Cluster-scoped target** → always a `ClusterSharedResource`.
+2. **Namespaced target, all contributors are `ResourcePatch`** → a `SharedResource` in the target's
+   namespace. By construction that is also every contributor's namespace.
+3. **Namespaced target with at least one `ClusterResourcePatch`** → a `ClusterSharedResource`,
+   reached by **promotion** (§6.3) if a `SharedResource` was already tracking it.
+
+Rule 3 exists because a namespaced tracker cannot honestly represent a contributor that is not in its
+namespace: its reference count would be incomplete, and an incomplete reference count deletes objects
+that are still in use.
 
 ## 4. Controller architecture
 
 ### 4.1 Reconcile the target, not the request
 
-The single most important structural decision: **`ResourcePatch`es are inputs, and the
-`SharedResource` is the unit of reconciliation.** The `SharedResource` controller is the *only* code
-path that writes to a target object.
+The single most important structural decision: **contributors are inputs, and the
+tracker is the unit of reconciliation.** The tracker controller is the *only* code path that writes
+to a target object, and exactly one tracker owns any given target (§3.5).
 
-The naive alternative — one controller reconciling `ResourcePatch`es, each writing its own slice — is
+The naive alternative — one controller reconciling contributors, each writing its own slice — is
 what `provider-kubernetes` does today, and it is why that approach needs blind conflict forcing. With
 N contributors writing independently you get N-way races on one object, non-deterministic apply
 order, no place to notice that two contributors want the same field, and no coherent moment at which
@@ -284,28 +387,41 @@ Aggregating first fixes all four at once:
 - conflicts are detected before any write, because all contributions are in hand;
 - the reference count is a list length, evaluated at one point in the code.
 
-### 4.2 The two controllers
+### 4.2 The controllers
 
-**`ResourcePatch` controller** — resolves and registers. It never writes to a target.
+Four CRDs, but **not four hand-written controllers.** The contributor types share one spec struct and
+differ only in reach, and the tracker types share one status struct and differ only in scope. The
+implementation is **one generic contributor reconciler and one generic tracker reconciler**,
+parameterised over scope and instantiated twice each. The scope split should cost a validation table
+and a tracker-selection rule, not a second copy of the logic.
+
+**Contributor controller** (`ResourcePatch`, `ClusterResourcePatch`) — resolves and registers. It
+never writes to a target.
 
 1. Validate the spec (mode/lifecycle compatibility, patch well-formedness).
 2. Resolve `spec.target` to a concrete list of target keys. `Single` yields exactly one — whether or
-   not the object exists. `Selector` yields zero or more, capped at `maxTargets`.
-3. Ensure a `SharedResource` exists for each resolved key (create if absent; `AlreadyExists` is a
-   normal, expected outcome and is not an error).
+   not the object exists. `Selector` yields zero or more, capped at `maxTargets`. For a
+   `ResourcePatch` every resolved key is forced into the CR's own namespace, re-checked here and not
+   only at admission.
+3. Select the tracker kind for each key by the rule in §3.5, and ensure it exists (create if absent;
+   `AlreadyExists` is a normal, expected outcome and not an error). A `ClusterResourcePatch` that
+   finds a namespaced `SharedResource` already tracking its target starts a **promotion** (§6.3).
 4. Add the `terasky.com/contributor` finalizer.
-5. Enqueue each `SharedResource`.
-6. Mirror the per-contributor state from `SharedResource.status.contributors` back onto
-   `ResourcePatch.status` as conditions.
+5. Enqueue each tracker.
+6. Mirror the per-contributor state from the tracker's `status.contributors` back onto the
+   contributor's `status` as conditions. A contributor whose tracker was promoted follows
+   `status.promotedTo` and re-registers on the `ClusterSharedResource`.
 
-On deletion it does *not* revert anything itself; it enqueues the `SharedResource` and waits for it
-to confirm the release before dropping the finalizer (§6).
+On deletion it does *not* revert anything itself; it enqueues its tracker and waits for it to confirm
+the release before dropping the finalizer (§6).
 
-**`SharedResource` controller** — the writer.
+**Tracker controller** (`SharedResource`, `ClusterSharedResource`) — the writer.
 
-1. List bound `ResourcePatch`es via a **field index on the computed target key**, so this is a cheap
-   indexed lookup rather than a cluster-wide scan. Selector-mode contributors are indexed against
-   every key they currently resolve to.
+1. List bound contributors via a **field index on the computed target key**, so this is a cheap
+   indexed lookup rather than a cluster-wide scan. The index spans **both** contributor kinds, since
+   after a promotion one tracker holds a mix of them. Selector-mode contributors are indexed against
+   every key they currently resolve to. A namespaced `SharedResource` indexes only within its own
+   namespace, which keeps its lookups cheap and its cache small.
 2. Sort by `(priority desc, creationTimestamp asc, uid asc)`. The `uid` tiebreak matters: two
    contributors created in the same clock tick must still sort identically on every replica and after
    every restart, or the object flaps.
@@ -313,13 +429,16 @@ to confirm the release before dropping the finalizer (§6).
 4. Detect conflicts across the sorted contributions (§5.3) and resolve per `conflictPolicy`.
 5. Apply (§5).
 6. Reconcile the reference count and lifecycle (§6).
-7. Write status on both the `SharedResource` and, indirectly, each contributor.
+7. Write status on both the tracker and, indirectly, each contributor.
+
+A tracker in `phase: Promoting` is **fenced**: it does not write to the target at all (§6.3).
 
 ### 4.3 Watching targets
 
 Target GVKs are not known at compile time, so the operator maintains **dynamic informers created
-lazily** on first use for a GVK and torn down when the last `SharedResource` for that GVK is deleted.
-Target events map back to a `SharedResource` by key.
+lazily** on first use for a GVK and torn down when the last tracker for that GVK is deleted. Target
+events map back to a tracker by key. A namespace-only install (§7.0) watches only namespaced kinds,
+and can restrict every informer to the namespaces it actually has contributors in.
 
 Watching arbitrary GVKs cluster-wide is the main scalability hazard — an informer over every `Secret`
 or `ConfigMap` in a large cluster is expensive. Mitigations, in order of preference:
@@ -398,7 +517,7 @@ The CSA path:
    previously set but has now dropped are removed.
 5. `Update` with a `resourceVersion` precondition; on 409, re-read and retry with backoff.
 
-The cost is real bookkeeping. For each contributor the `SharedResource` records **`ownedPaths`** (what
+The cost is real bookkeeping. For each contributor the tracker records **`ownedPaths`** (what
 this contributor set) **and `priorValues`** (what those paths held *before* this contributor first
 touched them, for paths that already existed). Revert then restores the original value rather than
 deleting the field — which is the correct behaviour when a contributor overwrote a pre-existing
@@ -406,7 +525,7 @@ setting rather than adding a new one, and is something SSA cannot express.
 
 Two rules about that bookkeeping:
 
-- It lives in `SharedResource.status`, **never in annotations on the target**. Annotations bloat,
+- It lives in the tracker's `status`, **never in annotations on the target**. Annotations bloat,
   leak into diffs users read, and are lost if another controller rewrites metadata.
 - It is keyed to `observedTargetUID`. If the target is deleted and recreated out of band, the UID
   changes, the bookkeeping is invalidated wholesale, and everything is re-applied from scratch. Stale
@@ -425,8 +544,9 @@ ingress class is normal.
 
 Detection is per mode: SSA gets it from the 409; CSA compares the rendered path sets before writing.
 Either way, resolution happens *before* any write, and the outcome is recorded in
-`SharedResource.status.conflicts` with the field path, all claimants, and the current holder — so a
-user can see who is fighting without reading `managedFields`.
+the tracker's `status.conflicts` with the field path, all claimants, and the current holder — so a
+user can see who is fighting without reading `managedFields`. Claimants are qualified by kind, since
+a namespaced and a cluster-scoped contributor can be party to the same conflict after a promotion.
 
 Whatever the policy, the object must never flap. A conflict that cannot be resolved parks with a
 condition and a backoff; it does not produce alternating writes.
@@ -435,13 +555,19 @@ condition and a backoff; it does not produce alternating writes.
 
 ## 6. Lifecycle & reference counting
 
-Finalizers on both CRDs: `terasky.com/contributor` on `ResourcePatch`,
-`terasky.com/shared-resource` on `SharedResource`.
+Finalizers on all four CRDs: `terasky.com/contributor` on `ResourcePatch` and
+`ClusterResourcePatch`, `terasky.com/shared-resource` on `SharedResource` and
+`ClusterSharedResource`.
+
+Everything in this section is scope-independent. Which tracker owns a given target is decided by
+§3.5; once decided, release, reference counting and deletion behave identically in both variants. The
+one scope-specific mechanic is promotion (§6.3).
 
 ### 6.1 Releasing one contributor
 
-A `ResourcePatch` is deleted (usually because its XR or Instance was deleted, propagating through
-`ownerReferences`). It enters `Terminating` with its finalizer held. The `SharedResource` controller:
+A contributor — `ResourcePatch` or `ClusterResourcePatch` — is deleted, usually because its XR or
+Instance was deleted, propagating through `ownerReferences`. It enters `Terminating` with its
+finalizer held. Its tracker:
 
 1. Marks the contributor `Releasing`.
 2. Applies its `onRelease` policy to that contributor's fields only:
@@ -450,7 +576,7 @@ A `ResourcePatch` is deleted (usually because its XR or Instance was deleted, pr
    - **`Orphan`** — leave the fields in place, untouched.
    - **`Delete`** — see §6.2; this is about the whole object, not the fields.
 3. Removes the contributor from `status.contributors`.
-4. Releases the `ResourcePatch` finalizer.
+4. Releases the contributor's finalizer.
 
 Order matters: the finalizer is released **only after** the revert is confirmed. A contributor that
 vanishes before its fields are withdrawn leaves fields nobody owns and nobody can find.
@@ -459,12 +585,13 @@ vanishes before its fields are withdrawn leaves fields nobody owns and nobody ca
 
 When `status.contributors` empties:
 
-- **`Orphan`** → leave the target; delete the `SharedResource`.
-- **`Revert`** → withdraw the remaining fields; leave the target; delete the `SharedResource`.
+- **`Orphan`** → leave the target; delete the tracker.
+- **`Revert`** → withdraw the remaining fields; leave the target; delete the tracker.
 - **`Delete`** → delete the target, **but only if both**:
   - `status.createdByOperator == true` — the operator created this object, so it is the operator's to
     remove; and
-  - the request comes from `status.creatorPatchRef` — the contributor that actually created it.
+  - the request comes from `status.creatorPatchRef` — the contributor that actually created it,
+  matched by kind, name, namespace **and UID**.
 
 That second condition is a hard safety property, not a nicety. Without it, any patch-only contributor
 could set `onRelease: Delete`, attach itself to a pre-existing production `Deployment`, and delete it
@@ -472,40 +599,89 @@ on the way out. A contributor that did not create an object may never delete it,
 for. Admission rejects `onRelease: Delete` combined with `onMissing: Fail|Wait` for the same reason,
 and the runtime check stands independently in case the spec was mutated afterwards.
 
-### 6.3 Why not `ownerReferences` on the target
+### 6.3 Promotion: when a namespaced target gains a cluster-scoped contributor
 
-Worth answering directly, because it is the first thing anyone reaches for.
+A namespaced target tracked by a `SharedResource` acquires its first `ClusterResourcePatch`
+contributor. Rule 3 of §3.5 says a `ClusterSharedResource` must now own it, because a namespaced
+tracker cannot count a contributor outside its namespace — and an undercount deletes objects that are
+still in use.
 
-Multi-owner GC *is* real reference counting and it is free. But it is unusable here: owners must be
-in the target's namespace, cluster-scoped targets cannot have namespaced owners, and — decisively —
-GC deletes unconditionally when the last owner disappears. That silently overrides
-`onRelease: Orphan` and `onRelease: Revert`, which are the two most common policies. Running both
-mechanisms means two independent deletion authorities over one object, one of which ignores the
-user's stated policy. **This design does not put `ownerReferences` on targets.** The `SharedResource`
-plus finalizers is the sole lifecycle authority, and it behaves identically for namespaced and
-cluster-scoped targets.
+The migration is **one-way and must never leave two trackers able to write.** It is keyed on the
+target and is idempotent, so a crash mid-flight resumes rather than corrupts:
+
+1. The contributor controller resolves the target and finds the existing `SharedResource`.
+2. **Fence first.** Set `status.phase: Promoting` and `status.promotedTo` on the namespaced tracker.
+   *This commit is what stops it writing, and it must land before step 3.* Ordering these the other
+   way round is the one way to get two writers on one object.
+3. Create the `ClusterSharedResource`, copying `status.contributors` — **including `ownedPaths` and
+   `priorValues`** — along with `observedTargetUID`, `observedResourceVersion`, `createdByOperator`,
+   `creatorPatchRef` and `observedBaseHash`.
+4. The `ClusterSharedResource` confirms adoption. **Only then** is the namespaced tracker's finalizer
+   released and the object deleted.
+5. Existing `ResourcePatch` contributors follow `promotedTo`, re-register on the cluster tracker, and
+   update `status.sharedResourceRefs`. Their contributions are never re-applied or reverted; nothing
+   about the target changes during a promotion.
+
+Two properties of that copy are load-bearing rather than incidental:
+
+- **Losing `priorValues` would silently break revert** for every existing contributor under
+  ClientSideApply — fields would be deleted on release instead of restored to what they held before.
+- **Losing `createdByOperator` / `creatorPatchRef` would silently break the delete-safety rule**
+  (§6.2): the tracker would no longer know that it created the object, or which contributor created
+  it, and the "only the creator may delete" guarantee would evaporate at exactly the moment the
+  contributor set became cross-namespace.
+
+Crash recovery: a fenced tracker with no `ClusterSharedResource` unfences and retries; a fenced
+tracker whose `ClusterSharedResource` already exists resumes at step 4.
+
+**Never demote.** When the last `ClusterResourcePatch` leaves, the `ClusterSharedResource` stays and
+keeps tracking the namespaced target. Demotion would be a second migration with all the same hazards
+for no user-visible benefit (§10).
+
+### 6.4 Why not `ownerReferences` on the target
+
+Worth answering directly, because it is the first thing anyone reaches for — and the honest answer
+now differs between the two variants.
+
+**For cluster-scoped targets and cross-namespace contributors, GC simply cannot express it.** Owners
+must be in the target's namespace; a cluster-scoped target cannot have a namespaced owner.
+
+**For the namespaced pair, GC genuinely would work** — contributors, tracker and target are all
+co-located, which is exactly the shape multi-owner GC handles. That objection has no force here, and
+§1 says so. The reason to reject it anyway is different, and stronger:
+
+- **GC deletes unconditionally** when the last owner disappears. That silently overrides
+  `onRelease: Orphan` and `onRelease: Revert` — the two most common policies. Running both mechanisms
+  means two independent deletion authorities over one object, and the one that ignores the user's
+  stated policy always wins the race.
+- **Uniformity.** A lifecycle that behaved one way for namespaced targets and another for
+  cluster-scoped ones would be a persistent source of surprise, and would make promotion (§6.3) a
+  change in deletion semantics rather than a bookkeeping migration.
+
+**So this design does not put `ownerReferences` on targets, in either variant.** The tracker plus
+finalizers is the sole lifecycle authority.
 
 The ownership chain that *does* work, and that this design depends on:
 
 ```
-XR / kro Instance  --ownerRef-->  ResourcePatch        (the orchestrator's job)
-ResourcePatch      --tracked by-> SharedResource       (the operator's job)
-SharedResource     --manages---->  target object       (the operator's job)
+XR / kro Instance --ownerRef--> ResourcePatch        --tracked by--> SharedResource        --manages--> target
+XR / kro Instance --ownerRef--> ClusterResourcePatch --tracked by--> ClusterSharedResource --manages--> target
 ```
 
 Deletion propagates *in* from the orchestrator by ordinary GC, and is *arbitrated* by the operator.
 Each layer does what it is good at.
 
-### 6.4 Recovering from lost state
+### 6.5 Recovering from lost state
 
 - **Missed delete events.** `status.contributors` is rebuilt from a live list on every reconcile, so a
-  contributor whose `ResourcePatch` no longer exists is detected and released on the next pass. A
-  periodic full resync sweeps `SharedResource`s that received no events at all.
+  contributor whose CR no longer exists is detected and released on the next pass. A
+  periodic full resync sweeps trackers that received no events at all.
 - **Target replaced out of band.** A changed `observedTargetUID` invalidates all CSA bookkeeping,
   raises `TargetReplaced`, and triggers a full re-apply.
 - **Target deleted out of band.** If any contributor sets `onMissing: Create`, recreate from that
   contributor's `base` and re-apply all contributions; otherwise park in `Waiting`.
-- **Empty `SharedResource`.** A tracker with no contributors and no lifecycle work pending is deleted.
+- **Empty tracker.** A tracker with no contributors and no lifecycle work pending is deleted.
+- **Interrupted promotion.** Resumed from the fence, per §6.3.
 
 ---
 
@@ -513,17 +689,51 @@ Each layer does what it is good at.
 
 **Start here when reviewing this design.** The hard problem is not merging — SSA does most of that.
 The hard problem is that this operator is an *"apply arbitrary fields to arbitrary objects"*
-primitive. Whoever can create a `ResourcePatch` inherits whatever the write path can do. Two layers
-address that: SubjectAccessReview at admission, and impersonation at write time.
+primitive. Whoever can create a contributor inherits whatever the write path can do.
+
+Three layers address that, in decreasing order of how much they can be relied upon: **containment by
+scope**, then SubjectAccessReview at admission, then impersonation at write time.
+
+### 7.0 Containment by scope — the primary control
+
+The scope split (§3.5) is the strongest security property in this design, because it is
+**structural rather than an authorization check**. A `ResourcePatch` in namespace `team-a` cannot
+touch an object outside `team-a`. Not "is not permitted to" — *cannot*: the target namespace is
+forced to the CR's own namespace at admission and re-checked at reconcile, and there is no field that
+expresses anything else.
+
+That matters because it holds **regardless of how privileged the creating principal is**. §7.4
+explains why that is not a hypothetical: patches created by Crossplane or kro are admitted as the
+orchestrator's near-cluster-admin ServiceAccount, so every check that reasons about the requester is
+weak for exactly the population of patches that matters most. Containment does not reason about the
+requester at all.
+
+The practical consequence for cluster operators:
+
+- **Grant `ResourcePatch` freely** in tenant namespaces — to tenants, and to Crossplane and kro. The
+  blast radius of that grant is one namespace, whatever the Composition author writes.
+- **Treat `ClusterResourcePatch` as a privileged grant**, held by the platform team. It is the only
+  one of the two that can cross a namespace boundary or touch a cluster-scoped object, so it is the
+  only one that needs the scrutiny §7.1–§7.4 describe.
+- **A namespace-only install is possible.** Don't install the `ClusterResourcePatch` and
+  `ClusterSharedResource` CRDs at all. The operator then needs no cluster-wide write RBAC, and
+  cross-namespace contribution is not merely denied but absent.
+
+Everything below is about making the `ClusterResourcePatch` path safe. It applies to `ResourcePatch`
+too, but there it is defence in depth on top of a boundary that already holds.
 
 ### 7.1 SubjectAccessReview on every mutation
 
-A validating webhook on `ResourcePatch` for **CREATE, UPDATE and DELETE** — not create alone — with
-`failurePolicy: Fail`. Each verb runs `SubjectAccessReview`s against the **target**, using
+A validating webhook on both contributor CRDs for **CREATE, UPDATE and DELETE** — not create alone —
+with `failurePolicy: Fail`. Each verb runs `SubjectAccessReview`s against the **target**, using
 `request.userInfo` as the subject. The question asked is always: *could this principal have made this
 change to the target directly?*
 
-| Verb on the `ResourcePatch` | SARs against the target |
+For a `ResourcePatch` the SAR is necessarily scoped to the CR's own namespace, because that is the
+only namespace it can reach. For a `ClusterResourcePatch` the SAR is the first real boundary, and is
+scoped to whatever namespace — or cluster scope — the target names.
+
+| Verb on the contributor | SARs against the target |
 |---|---|
 | **CREATE** | `patch` and `update`; plus `create` if `onMissing: Create`; plus `delete` if `onRelease: Delete` |
 | **UPDATE** | the same set, evaluated against **both the old and the new target** when `spec.target` changes, and re-evaluated when `lifecycle` widens (e.g. `Revert` → `Delete`) |
@@ -542,8 +752,10 @@ Implementation notes:
   object of this kind in this namespace?". That is the stricter question, and it is the correct one:
   a selector may match objects that do not exist yet.
 - Cluster-scoped targets are checked with an empty namespace.
-- Also denied at admission: a `ResourcePatch` targeting a `ResourcePatch` or a `SharedResource`. This
-  is **reconcile-loop safety**, not a sensitive-kind policy.
+- Also denied at admission: a contributor targeting any of this operator's own four kinds. This is
+  **reconcile-loop safety**, not a sensitive-kind policy.
+- A `ResourcePatch` whose `target.namespace` names anything other than its own namespace is rejected
+  outright (§3.2) — before any SAR runs, since no SAR could make it legal.
 
 **There is no protected-GVK allowlist or denylist in this design.** Authorization is SAR plus
 impersonation. The operator holds no opinion about which kinds are sensitive; RBAC already encodes
@@ -552,8 +764,8 @@ cluster admins must remember to maintain.
 
 ### 7.2 Re-checking after admission
 
-Admission is point-in-time. A `ResourcePatch` created while its author held broad rights keeps
-working forever after those rights are revoked, because nothing ever touches the CR again.
+Admission is point-in-time. A contributor created while its author held broad rights keeps working
+forever after those rights are revoked, because nothing ever touches the CR again.
 
 So: the webhook records the admitting principal in an immutable annotation, and the controller
 re-runs the SAR before writes on a TTL (~10 minutes), and immediately whenever the effective target
@@ -577,27 +789,40 @@ Guard rails, so that impersonation is not itself the escalation:
   referenced SA, namespace = its namespace, subject = `request.userInfo`. You may only point a
   `ResourcePatch` at a ServiceAccount you could already impersonate. Without this check
   `serviceAccountRef` would be a way to *borrow* privilege rather than drop it.
-- **`serviceAccountRef.namespace` defaults to the `ResourcePatch`'s own namespace.** A cross-namespace
-  reference is gated by that same `impersonate` SAR, and can be disabled cluster-wide by a flag.
+- **`ResourcePatch` may only name a ServiceAccount in its own namespace** — the field has no
+  `namespace` sub-field there at all (§3.2), so the containment property of §7.0 extends to the
+  identity the write runs as. `ClusterResourcePatch` may name any ServiceAccount, gated by that same
+  `impersonate` SAR, and cross-namespace references can be disabled cluster-wide by a flag.
 - **When `serviceAccountRef` is unset**, writes use the operator's own identity, bounded only by the
   admission SAR. That is the weaker configuration. Docs should recommend `serviceAccountRef` for any
   cluster with more than one tenant.
 
 ### 7.4 The caveat to state loudly
 
-When Crossplane or kro creates the `ResourcePatch`, `request.userInfo` is the **orchestrator's**
+When Crossplane or kro creates a contributor, `request.userInfo` is the **orchestrator's**
 ServiceAccount — Crossplane's or kro's controller SA — not the human who created the XR. Those SAs
 are typically close to cluster-admin, because they have to be able to create anything a Composition
 might reference.
 
-So SAR meaningfully bounds a user creating `ResourcePatch`es directly, and does comparatively little
-against a Composition author, who is writing patches that will be admitted as a near-cluster-admin.
-The real boundary for composed patches is `serviceAccountRef`: the Composition or RGD author sets it
-to voluntarily drop the write path to a tenant identity, and a platform team can require it. This is
-exactly why it belongs in v1alpha1 and not on the roadmap.
+So SAR meaningfully bounds a user creating contributors directly, and does comparatively little
+against a Composition author, whose patches are admitted as a near-cluster-admin. **This caveat now
+applies almost entirely to `ClusterResourcePatch`**, and that is the point of the scope split: for a
+`ResourcePatch`, a near-cluster-admin admitting principal buys nothing, because the namespace
+boundary is structural and does not consult the principal at all (§7.0).
+
+For `ClusterResourcePatch` the caveat stands in full, and there are two answers:
+
+1. **Do not grant it to the orchestrators.** If Crossplane cannot create `ClusterResourcePatch`es, no
+   Composition can author a cross-namespace patch, and the question does not arise. This is the
+   recommended default, and it is why §7.0 says to grant the namespaced kind freely and the cluster
+   kind narrowly.
+2. **Where a Composition genuinely must contribute to a shared platform object**, set
+   `serviceAccountRef` so the write path drops to a tenant identity the API server enforces on every
+   write. A platform team can require it. This is exactly why `serviceAccountRef` belongs in
+   v1alpha1 and not on the roadmap.
 
 Documentation must say this plainly rather than implying that admission checks alone make the
-operator safe in a multi-tenant cluster. They do not.
+operator safe in a multi-tenant cluster. For `ClusterResourcePatch`, they do not.
 
 ---
 
@@ -609,11 +834,15 @@ operator safe in a multi-tenant cluster. They do not.
 | **Foreign controller uses `Update`, not `Apply`** | `Update` collapses `managedFields` ownership. Field values survive; ownership records degrade. The operator detects that its manager entry vanished while its fields persist, and re-applies to reassert ownership. Frequent recurrence is reported — that target has a controller this operator cannot cooperate with. |
 | **Target deleted out of band** | Recreate from `base` if any contributor sets `onMissing: Create`; otherwise `Waiting`. |
 | **Target replaced (UID changed)** | Invalidate CSA bookkeeping, `TargetReplaced`, full re-apply (§6.4). |
-| **Webhook unavailable** | `failurePolicy: Fail` means `ResourcePatch` writes are rejected, which blocks XR reconciliation. This is the correct trade for an authorization webhook, but it makes webhook availability a hard dependency: run ≥2 replicas, and document it as a cluster-wide blast radius. |
-| **Selector fan-out blast radius** | `maxTargets` caps a single contributor; exceeding it fails the contributor rather than silently truncating. Applies are rate-limited across a fan-out so one `ResourcePatch` cannot saturate the API server. |
+| **Webhook unavailable** | `failurePolicy: Fail` means contributor writes are rejected, which blocks XR reconciliation. This is the correct trade for an authorization webhook, but it makes webhook availability a hard dependency: run ≥2 replicas, and document it as a cluster-wide blast radius. |
+| **Selector fan-out blast radius** | `maxTargets` caps a single contributor; exceeding it fails the contributor rather than silently truncating. Applies are rate-limited across a fan-out so one contributor cannot saturate the API server. A namespaced contributor is additionally bounded by its namespace; for `ClusterResourcePatch` with a `namespaceSelector`, `maxTargets` is the only bound. |
+| **Cluster and namespaced contributors racing to create a tracker** | Both may attempt creation for the same target. Tracker names are deterministic (§3.3), so one wins and the other's `AlreadyExists` is a normal outcome; the scope rule (§3.5) then decides whether the namespaced one must promote. The rule is a function of the contributor set, never of arrival order, so the outcome is the same whoever wins the race. |
 | **This operator and `Object` on the same resource** | Both use SSA field managers, so they coexist if their fields are disjoint. `conflictPolicy: Priority` deliberately will not force against a foreign manager, so `Object`'s unconditional forcing wins any genuine overlap and the contributor reports `Conflict` rather than flapping. Document: pick one owner per field. |
-| **Operator down** | Nothing reverts, nothing is deleted (finalizers hold `ResourcePatch` deletions pending). Targets keep their last applied state. Deleting an XR blocks until the operator returns — an availability cost that must be documented. |
-| **Contributor stuck terminating** | If a revert cannot complete (target unreachable, authorization lost), the `ResourcePatch` finalizer is held and the condition says why. Provide a documented, explicit break-glass for dropping the finalizer, since a wedged finalizer otherwise blocks XR deletion indefinitely. |
+| **Operator down** | Nothing reverts, nothing is deleted (finalizers hold contributor deletions pending). Targets keep their last applied state. Deleting an XR blocks until the operator returns — an availability cost that must be documented. |
+| **Promotion interrupted mid-flight** | The fence (§6.3) is committed before the `ClusterSharedResource` is created, so an interrupted promotion leaves the namespaced tracker fenced and *not writing* — never two writers. Recovery resumes from the fence: unfence and retry if no cluster tracker exists, otherwise complete the hand-over. A tracker stuck `Promoting` past a threshold is reported. |
+| **Contributors disagree on `onRelease` for one target** | Legal and common — a creator says `Delete`, a patch-only contributor says `Revert`. Each policy applies only to its own contributor's fields (§6.1); the object-level action at last release is decided by the creator's policy alone, and only if it *is* the creator (§6.2). After a promotion the mix spans both contributor kinds, which changes nothing: the rule keys on `creatorPatchRef`, not on scope. |
+| **Target namespace deleted under a namespaced contributor** | Namespace deletion removes the target, the `SharedResource` and the `ResourcePatch`es together, since all three live there. Finalizers must not wedge the namespace in `Terminating`: a tracker whose namespace is terminating skips revert (there is nothing left to revert onto) and releases finalizers promptly. |
+| **Contributor stuck terminating** | If a revert cannot complete (target unreachable, authorization lost), the contributor's finalizer is held and the condition says why. Provide a documented, explicit break-glass for dropping the finalizer, since a wedged finalizer otherwise blocks XR deletion indefinitely. |
 
 ---
 
@@ -623,17 +852,21 @@ operator safe in a multi-tenant cluster. They do not.
 `lastTransitionTime`) so XR readiness checks and kro status roll-ups consume them directly:
 `Ready`, `Synced`, `TargetFound`, `Applied`, `Conflict`, `Authorized`.
 
-**Events** on the `ResourcePatch` (what happened to my contribution), on the `SharedResource` (what
-happened to this target), and on the target itself (who contributed and when — so someone reading
+**Events** on the contributor (what happened to my contribution), on the tracker (what happened to
+this target), and on the target itself (who contributed and when — so someone reading
 `kubectl describe` on a shared Ingress can see this operator is involved without knowing it exists).
 
-**Metrics:** contributors per target (a histogram — the tail identifies objects that have become
+**Metrics**, all labelled by tracker scope so a namespace-only install can drop the cluster series:
+contributors per target (a histogram — the tail identifies objects that have become
 coordination bottlenecks); conflicts by field path; forced conflicts (should be near zero; a rising
 count means users are papering over a real disagreement); apply latency by mode; revert failures;
 watched-GVK count against the cap; SAR denials and impersonation failures.
 
-**`kubectl` printer columns** on `SharedResource`: target kind/namespace/name, contributor count,
-phase, conflict count, age. Answering "who is writing to this object?" should be one command.
+**`kubectl` printer columns** on both trackers: target kind/namespace/name, contributor count, phase,
+conflict count, age. Answering "who is writing to this object?" should be one command — and because a
+namespaced target may be tracked by either kind after a promotion, the docs should give the
+two-command form (`kubectl get sharedresources -n <ns>` and `kubectl get clustersharedresources`) or
+a printer column on the contributor pointing at its tracker.
 
 ---
 
@@ -644,12 +877,19 @@ phase, conflict count, age. Answering "who is writing to this object?" should be
   contributor that needs a value derived from the *live target* has no way to express it today.
 - **`baseReconcile: Enforce`.** Continuously re-asserting the base needs its own priority semantics
   against contributions, and reintroduces the base-versus-patch fight `CreateOnly` avoids (§3.1).
-- **User-creatable `SharedResource`.** Letting a platform team pre-declare a shared target — its
+- **User-creatable trackers.** Letting a platform team pre-declare a shared target — its
   base, its apply mode, its policy — before any contributor exists would move policy from N
   contributors to one place. Attractive, but it makes the tracker a user-facing API with its own
   authorization story.
-- **Requiring `serviceAccountRef` cluster-wide.** A flag making it mandatory would give platform
-  teams a single switch for multi-tenant safety (§7.4).
+- **Requiring `serviceAccountRef` cluster-wide.** A flag making it mandatory — or mandatory only for
+  `ClusterResourcePatch` — would give platform teams a single switch for multi-tenant safety (§7.4).
+- **Demotion.** When the last `ClusterResourcePatch` leaves a promoted namespaced target, the tracker
+  stays cluster-scoped (§6.3). Demoting would restore the tidier namespaced tracker, at the cost of a
+  second migration with the same fencing hazards and no user-visible benefit. Deliberately deferred.
+- **A namespace allowlist on `ClusterResourcePatch`.** Constraining a cluster-scoped contributor to a
+  named set of namespaces would give an intermediate privilege level between the two CRDs. Attractive,
+  but it re-introduces a policy surface that §7 otherwise avoids, and RBAC on the namespaced kind
+  already covers most of the need.
 - **Contributor-visible target state.** Exposing selected live target fields on `ResourcePatch.status`
   so an XR can consume them, overlapping with kro's `externalRef`.
 - **API group naming.** `terasky.com/v1alpha1` for now; revisit before any v1beta1.
@@ -658,18 +898,23 @@ phase, conflict count, age. Answering "who is writing to this object?" should be
 
 ## Appendix A — worked scenarios
 
-Three walkthroughs, each chosen because it is where a design like this usually breaks.
+Four walkthroughs, each chosen because it is where a design like this usually breaks.
 
 ### A.1 Two XRs contribute to one Ingress; one creates, one only patches
 
-`team-a` (priority 100) sets `onMissing: Create` with a `base` and contributes a rule for
-`team-a.example.com`. `team-b` (priority 100) sets `onMissing: Wait`, no `base`, and contributes a
-rule for `team-b.example.com`. Both use `mode: ClientSideApply` with
+The shared Ingress lives in `platform`; the contributing XRs are in `team-a` and `team-b`. **That is
+cross-namespace, so both contributors are `ClusterResourcePatch`es** (§3.5) — a `ResourcePatch` in
+`team-a` could not name a target in `platform` at all. In a well-run cluster these are authored by
+the platform team, not by tenant Compositions (§7.0).
+
+`team-a`'s contributor (priority 100) sets `onMissing: Create` with a `base` and contributes a rule
+for `team-a.example.com`. `team-b`'s (priority 100) sets `onMissing: Wait`, no `base`, and contributes
+a rule for `team-b.example.com`. Both use `mode: ClientSideApply` with
 `mergeKeys: [{path: spec.rules, key: host}]` — see A.3 for why.
 
-1. Both `ResourcePatch` controllers resolve to the same target key and race to create the
-   `SharedResource`. One wins; the other's `AlreadyExists` is normal. Both register as contributors.
-2. The `SharedResource` controller sorts them (equal priority → `creationTimestamp`, then `uid`).
+1. Both controllers resolve to the same target key and race to create the `ClusterSharedResource`.
+   One wins; the other's `AlreadyExists` is normal. Both register as contributors.
+2. The tracker controller sorts them (equal priority → `creationTimestamp`, then `uid`).
    The target is absent, so it consults the highest-priority contributor: `team-a`, which says
    `Create`. It creates the Ingress from `team-a`'s base, records `createdByOperator: true` and
    `creatorPatchRef: team-a/...`.
@@ -683,9 +928,9 @@ rule for `team-b.example.com`. Both use `mode: ClientSideApply` with
 This is the case that breaks naive lead-follower designs, where deleting the "lead" takes the object
 out from under everyone else.
 
-1. `team-a`'s XR is deleted; GC deletes its `ResourcePatch`, which enters `Terminating` with its
-   finalizer held.
-2. The `SharedResource` controller marks `team-a` `Releasing` and applies its `onRelease: Revert`:
+1. `team-a`'s XR is deleted; GC deletes its `ClusterResourcePatch`, which enters `Terminating` with
+   its finalizer held.
+2. The tracker marks `team-a` `Releasing` and applies its `onRelease: Revert`:
    its rule is removed from `spec.rules`; `team-b`'s is untouched.
 3. `team-a` is dropped from `status.contributors`; **only then** is its finalizer released.
 4. `status.contributors` is not empty — `team-b` remains — so **no lifecycle action is taken on the
@@ -717,4 +962,47 @@ list.
   mode, resolved by `conflictPolicy`.
 
 This scenario is the justification for CSA existing. The most obvious use case for the operator is
-unsatisfiable under SSA alone.
+unsatisfiable under SSA alone. It is also entirely scope-independent: nothing about atomic lists
+changes between the namespaced and cluster-scoped pairs.
+
+### A.4 A namespaced target is promoted mid-life
+
+The case the scope split introduces, and the one where a careless implementation loses data.
+
+`team-a` runs a shared Ingress *inside its own namespace*, `team-a/team-a-shared-ingress`. Two
+`ResourcePatch`es in `team-a` contribute rules — the contained, low-privilege pattern of §7.0. A
+`SharedResource` in `team-a` tracks it. `checkout-ingress-rule` created the object, so
+`createdByOperator: true` and `creatorPatchRef` names it. Both contributors use ClientSideApply, and
+one of them overwrote a pre-existing annotation, so its `priorValues` is non-empty.
+
+The platform team now needs to add a rule to that same Ingress from outside `team-a` — say a shared
+status endpoint. They author a `ClusterResourcePatch`.
+
+1. The contributor controller resolves the target, finds the existing `SharedResource` in `team-a`,
+   and sees that rule 3 of §3.5 now applies: a namespaced tracker cannot count a contributor that is
+   not in its namespace.
+2. **Fence.** `status.phase: Promoting` and `status.promotedTo` are committed on the `team-a`
+   tracker. From this moment it writes nothing.
+3. A `ClusterSharedResource` is created, copying both contributors — with their `ownedPaths` and
+   `priorValues` — plus `observedTargetUID`, `observedResourceVersion`, `createdByOperator`,
+   `creatorPatchRef` and `observedBaseHash`.
+4. The `ClusterSharedResource` confirms adoption; the `team-a` tracker's finalizer is released and it
+   is deleted.
+5. Both `ResourcePatch`es follow `promotedTo` and re-register on the cluster tracker. The new
+   `ClusterResourcePatch` registers alongside them.
+
+What did **not** happen is the point:
+
+- **The Ingress was never written during the migration.** No revert, no re-apply, no flap. A user
+  watching the object sees nothing.
+- **`checkout-ingress-rule` is still the creator.** `creatorPatchRef` survived the copy, so the
+  delete-safety rule (§6.2) still knows that this object was operator-created and by whom. Had it
+  been dropped, the newly-arrived `ClusterResourcePatch` would have found an object with no recorded
+  creator — and "only the creator may delete" would have quietly stopped protecting anything.
+- **`priorValues` survived**, so the contributor that overwrote an annotation will still *restore* it
+  on release rather than deleting it.
+- **The `ResourcePatch`es are unchanged and still namespaced.** They did not become privileged by
+  being promoted; they still cannot name a target outside `team-a`. Only the bookkeeping moved.
+
+When the platform team's `ClusterResourcePatch` is later deleted, the tracker stays a
+`ClusterSharedResource` (§6.3). The two `ResourcePatch`es carry on against it exactly as before.

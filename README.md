@@ -22,20 +22,42 @@ explicit conflict arbitration**.
 
 ## Shape
 
-Two CRDs in `terasky.com/v1alpha1`:
+Four CRDs in `terasky.com/v1alpha1`, in two scope-matched pairs that mirror `Role`/`ClusterRole`.
+Users write only the *contributors*; the *trackers* are operator-owned.
 
-- **`ResourcePatch`** (namespaced) — one per contributing instantiation, emitted by a Composition or
-  RGD. Declares the target, what to contribute, what to do if the target is missing, and what to do
-  on release.
-- **`SharedResource`** (cluster-scoped) — operator-owned tracker, one per target object. Holds the
-  contributor list (the reference count) and is the *only* writer to the target.
+| CRD | Scope | May target | Tracked by |
+|---|---|---|---|
+| **`ResourcePatch`** | namespaced | namespaced kinds, **its own namespace only** | `SharedResource` in that namespace |
+| **`ClusterResourcePatch`** | cluster | any namespace, and cluster-scoped kinds | `ClusterSharedResource` |
+
+A contributor declares the target, what to contribute, what to do if the target is missing, and what
+to do on release. A tracker holds the contributor list — the reference count — and is the *only*
+writer to its target. Exactly one tracker owns any given object.
 
 Both server-side apply (default) and client-side apply are supported — the latter is not a legacy
 mode but the one that makes targets with atomic list fields, `Ingress.spec.rules` among them, work at
 all.
 
+## On multi-tenancy
+
+This is an "apply arbitrary fields to arbitrary objects" primitive, so authorization is the hard part
+— not the merging. The scope split is the strongest control, because it is **structural rather than
+an authorization check**: a `ResourcePatch` *cannot* reach outside its namespace regardless of how
+privileged the principal creating it is.
+
+That distinction matters in practice. A patch emitted by a Crossplane Composition is admitted as
+Crossplane's ServiceAccount, which is typically close to cluster-admin — so every check that reasons
+about the requester is weak for exactly the patches that matter most. Containment does not reason
+about the requester at all.
+
+So: **grant `ResourcePatch` freely** in tenant namespaces, and **treat `ClusterResourcePatch` as a
+platform-team grant**. A namespace-only install — omitting the cluster CRDs entirely — needs no
+cluster-wide write RBAC. SubjectAccessReview on every mutation and optional ServiceAccount
+impersonation back this up; see §7.
+
 ## Read next
 
-- **[DESIGN.md](./DESIGN.md)** — the full design. Start at §7 (Authorization): this is an
-  "apply arbitrary fields to arbitrary objects" primitive, and that is the hard part, not the merging.
-- **[examples/](./examples/)** — contributor manifests and how Crossplane and kro emit them.
+- **[DESIGN.md](./DESIGN.md)** — the full design. Start at §7 (Authorization).
+- **[examples/namespaced/](./examples/namespaced/)** — the contained, low-privilege pattern.
+- **[examples/cluster/](./examples/cluster/)** — cross-namespace and cluster-scoped targets.
+- **[examples/](./examples/)** — how Crossplane and kro emit each kind.

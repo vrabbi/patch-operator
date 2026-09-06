@@ -1,4 +1,13 @@
-# Creator contributor.
+# Creator contributor -- CLUSTER-SCOPED.
+#
+# The shared Ingress lives in `platform` while the contributing XRs live in tenant
+# namespaces, so this is cross-namespace and must be a ClusterResourcePatch: a
+# namespaced ResourcePatch cannot name a target outside its own namespace at all
+# (DESIGN.md 3.2, 3.5).
+#
+# ClusterResourcePatch is the privileged kind. Grant it to the platform team, not
+# to tenant Compositions -- see examples/namespaced/ for the contained pattern and
+# DESIGN.md 7.0 for why that distinction carries most of the multi-tenancy weight.
 #
 # Owns the create-on-missing and delete-on-last-release lifecycle for the shared
 # Ingress, and contributes one rule of its own. Only this contributor may ever
@@ -8,10 +17,9 @@
 # listMapKey, so under server-side apply a single field manager would own the whole
 # list and no second contributor could add a rule (DESIGN.md 5.2, A.3).
 apiVersion: terasky.com/v1alpha1
-kind: ResourcePatch
+kind: ClusterResourcePatch
 metadata:
-  name: team-a-ingress-rule
-  namespace: team-a
+  name: team-a-platform-ingress-rule
 spec:
   target:
     mode: Single
@@ -32,8 +40,13 @@ spec:
 
   priority: 100
 
+  # Cross-namespace serviceAccountRef is allowed on the cluster kind, gated by an
+  # `impersonate` SubjectAccessReview against the requesting principal (DESIGN.md
+  # 7.3). It drops the write path to the tenant's identity, which the API server
+  # enforces on every write rather than once at admission.
   serviceAccountRef:
     name: team-a-patcher
+    namespace: team-a
 
   # Seed manifest. Written once, at creation, and never re-asserted, so it can
   # never claw back a field a contributor sets later.

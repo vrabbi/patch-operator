@@ -1,0 +1,77 @@
+# Creator contributor -- NAMESPACED. The contained, low-privilege pattern.
+#
+# Everything lives in team-a: the contributors, the target Ingress, and the
+# SharedResource tracking it. A ResourcePatch CANNOT name a target outside its own
+# namespace -- target.namespace defaults to metadata.namespace and any other value
+# is rejected at admission, then re-checked at reconcile (DESIGN.md 3.2).
+#
+# That containment is structural, not a policy check, so it holds regardless of how
+# privileged the principal creating this object is. Which is the point: patches
+# authored by a Crossplane Composition are admitted as Crossplane's near-cluster-
+# admin ServiceAccount, so every check that reasons about the requester is weak for
+# exactly those patches -- and this one does not reason about the requester at all
+# (DESIGN.md 7.0, 7.4).
+#
+# Grant this kind freely in tenant namespaces. Reach for ClusterResourcePatch (see
+# ../cluster/) only when a target genuinely lives in another namespace.
+apiVersion: terasky.com/v1alpha1
+kind: ResourcePatch
+metadata:
+  name: checkout-ingress-rule
+  namespace: team-a
+spec:
+  target:
+    mode: Single
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    name: team-a-shared-ingress
+    # namespace omitted: defaults to metadata.namespace (team-a). Stating
+    # `namespace: team-a` explicitly is equally valid; anything else is rejected.
+
+  lifecycle:
+    onMissing: Create
+    onRelease: Revert
+    adoptExisting: true
+    baseReconcile: CreateOnly
+
+  apply:
+    # ClientSideApply because Ingress.spec.rules is an atomic list: it carries no
+    # listMapKey, so under server-side apply one field manager would own the whole
+    # list and no second contributor could add a rule (DESIGN.md 5.2, A.3).
+    mode: ClientSideApply
+    conflictPolicy: Fail
+
+  priority: 100
+
+  # Always resolved in this ResourcePatch's own namespace -- the field has no
+  # `namespace` sub-field on the namespaced kind (DESIGN.md 3.2).
+  serviceAccountRef:
+    name: team-a-patcher
+
+  base:
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: team-a-shared-ingress
+      namespace: team-a
+    spec:
+      ingressClassName: nginx
+
+  patch:
+    type: StrategicMerge
+    mergeKeys:
+      - path: spec.rules
+        key: host
+    value:
+      spec:
+        rules:
+          - host: checkout.team-a.example.com
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: checkout
+                      port:
+                        number: 80

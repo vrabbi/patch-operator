@@ -1,29 +1,39 @@
 # How a Crossplane XR emits a contributor.
 #
-# The XR owns the ResourcePatch via the ordinary composed-resource ownerReference.
+# The XR owns the contributor via the ordinary composed-resource ownerReference.
 # That is the whole integration: deletion propagates IN from Crossplane by normal
 # garbage collection, and the operator arbitrates what that means for the shared
-# target (DESIGN.md 6.3).
+# target (DESIGN.md 6.4).
 #
-#   XR --ownerRef--> ResourcePatch --tracked by--> SharedResource --manages--> Ingress
+#   XR --ownerRef--> ResourcePatch --tracked by--> SharedResource --manages--> target
 #
-# Readiness needs no adapter. ResourcePatch publishes a Crossplane-shaped Ready
+# Readiness needs no adapter. Contributors publish a Crossplane-shaped Ready
 # condition, so Crossplane's default readiness check gates the XR on it directly.
 # Ready=True means the contribution is applied to every resolved target AND the
 # contributor is not party to an unresolved conflict, so an XR never reports ready
 # while its ingress rule is stuck behind a field conflict (DESIGN.md 3.1).
 #
-# Note on authorization: the principal seen at admission here is CROSSPLANE'S
-# ServiceAccount, not the user who created the XR, and it is typically close to
-# cluster-admin. SubjectAccessReview alone therefore does little to bound a
-# Composition author. spec.serviceAccountRef is the real boundary -- it drops the
-# write path to a tenant identity that the API server enforces on every write
-# (DESIGN.md 7.3, 7.4). Set it in composed patches, and require it if you run
-# multi-tenant.
+# ============================================================================
+# WHICH KIND SHOULD A COMPOSITION EMIT?
+#
+# Default to ResourcePatch (document 1). The principal admitting a composed patch
+# is CROSSPLANE'S ServiceAccount, not the user who created the XR, and it is
+# typically close to cluster-admin -- so SubjectAccessReview does little to bound a
+# Composition author. A namespaced ResourcePatch does not care: it cannot reach
+# outside its namespace whatever the principal can do (DESIGN.md 7.0, 7.4).
+#
+# Emit ClusterResourcePatch (document 2) only when the shared target genuinely
+# lives in another namespace. It is a privileged kind and needs a separate RBAC
+# grant -- withholding it from Crossplane's ServiceAccount is what makes the
+# containment above a real boundary rather than a convention.
+# ============================================================================
+---
+# Document 1 -- RECOMMENDED. Contained: a per-tenant shared Ingress in the XR's
+# own namespace, contributed to by every XApp in that namespace.
 apiVersion: apiextensions.crossplane.io/v1
 kind: Composition
 metadata:
-  name: app-with-shared-ingress
+  name: app-with-namespaced-shared-ingress
 spec:
   compositeTypeRef:
     apiVersion: platform.terasky.com/v1alpha1
@@ -47,7 +57,8 @@ spec:
                   apiVersion: networking.k8s.io/v1
                   kind: Ingress
                   name: shared-ingress
-                  namespace: platform
+                  # No target.namespace: it defaults to this ResourcePatch's own
+                  # namespace, and nothing else would be accepted.
                 lifecycle:
                   onMissing: Create
                   onRelease: Revert
@@ -61,7 +72,6 @@ spec:
                   kind: Ingress
                   metadata:
                     name: shared-ingress
-                    namespace: platform
                   spec:
                     ingressClassName: nginx
                 patch:
@@ -83,6 +93,11 @@ spec:
                                     port:
                                       number: 80
             patches:
+              # Place the contributor in the XR's namespace. Everything -- target,
+              # tracker, contributors -- then lives there together.
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.namespace
+                toFieldPath: metadata.namespace
               # Each XApp contributes exactly one rule, keyed by its own hostname.
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.hostname
@@ -90,8 +105,83 @@ spec:
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.serviceName
                 toFieldPath: spec.patch.value.spec.rules[0].http.paths[0].backend.service.name
+              # The base seed must name the same namespace as the contributor.
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.namespace
+                toFieldPath: spec.base.metadata.namespace
+---
+# Document 2 -- PRIVILEGED. Only when the shared target is genuinely in another
+# namespace. Requires granting Crossplane's ServiceAccount create on
+# clusterresourcepatches, which is the grant that lets a Composition author reach
+# across namespaces. Withhold it unless you mean it.
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: app-with-platform-shared-ingress
+spec:
+  compositeTypeRef:
+    apiVersion: platform.terasky.com/v1alpha1
+    kind: XApp
+  mode: Pipeline
+  pipeline:
+    - step: patch-and-transform
+      functionRef:
+        name: function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          - name: platform-ingress-contribution
+            base:
+              apiVersion: terasky.com/v1alpha1
+              kind: ClusterResourcePatch
+              spec:
+                target:
+                  mode: Single
+                  apiVersion: networking.k8s.io/v1
+                  kind: Ingress
+                  name: shared-ingress
+                  namespace: platform
+                lifecycle:
+                  onMissing: Wait
+                  onRelease: Revert
+                apply:
+                  mode: ClientSideApply
+                  conflictPolicy: Fail
+                priority: 100
+                patch:
+                  type: StrategicMerge
+                  mergeKeys:
+                    - path: spec.rules
+                      key: host
+                  value:
+                    spec:
+                      rules:
+                        - host: placeholder
+                          http:
+                            paths:
+                              - path: /
+                                pathType: Prefix
+                                backend:
+                                  service:
+                                    name: placeholder
+                                    port:
+                                      number: 80
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.hostname
+                toFieldPath: spec.patch.value.spec.rules[0].host
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.serviceName
+                toFieldPath: spec.patch.value.spec.rules[0].http.paths[0].backend.service.name
               # Impersonate the tenant, so the write carries the tenant's RBAC
-              # rather than Crossplane's.
+              # rather than Crossplane's. On the cluster kind this may name a
+              # ServiceAccount in another namespace, gated by an `impersonate`
+              # SubjectAccessReview (DESIGN.md 7.3). Set it whenever a Composition
+              # emits ClusterResourcePatch -- it is the real boundary here.
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.namespace
+                toFieldPath: spec.serviceAccountRef.namespace
               - type: FromCompositeFieldPath
                 fromFieldPath: spec.tenant
                 toFieldPath: spec.serviceAccountRef.name

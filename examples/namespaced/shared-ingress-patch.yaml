@@ -1,0 +1,56 @@
+# Patch-only contributor -- NAMESPACED.
+#
+# A second app in the same namespace contributing its own rule to the same shared
+# Ingress. Carries no base and never creates the target: onMissing: Wait parks it
+# until the creating contributor has made the object.
+#
+# It cannot delete the target either. onRelease: Delete combined with onMissing:
+# Wait is rejected at admission, and the runtime rule stands independently: only
+# the contributor that actually created an object may delete it, matched by kind,
+# name, namespace and UID (DESIGN.md 6.2).
+#
+# When this contributor is deleted, only its own rule is withdrawn -- including
+# when the creating contributor left first (DESIGN.md A.2).
+apiVersion: terasky.com/v1alpha1
+kind: ResourcePatch
+metadata:
+  name: search-ingress-rule
+  namespace: team-a
+spec:
+  target:
+    mode: Single
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    name: team-a-shared-ingress
+
+  lifecycle:
+    onMissing: Wait
+    onRelease: Revert
+
+  apply:
+    mode: ClientSideApply
+    conflictPolicy: Fail
+
+  priority: 100
+
+  serviceAccountRef:
+    name: team-a-patcher
+
+  patch:
+    type: StrategicMerge
+    mergeKeys:
+      - path: spec.rules
+        key: host
+    value:
+      spec:
+        rules:
+          - host: search.team-a.example.com
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: search
+                      port:
+                        number: 80

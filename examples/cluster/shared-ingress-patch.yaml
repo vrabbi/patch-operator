@@ -1,4 +1,7 @@
-# Patch-only contributor against the same shared Ingress.
+# Patch-only contributor against the same shared Ingress -- CLUSTER-SCOPED.
+#
+# Cross-namespace for the same reason as shared-ingress-create.yaml: the target is
+# in `platform`, this contributor's XR is not (DESIGN.md 3.5).
 #
 # Carries no base and never creates the target: onMissing: Wait parks it until
 # some other contributor has created the object. It cannot delete the target
@@ -9,10 +12,9 @@
 # and every other contributor's rules are untouched -- including when the
 # creating contributor left first (DESIGN.md A.2).
 apiVersion: terasky.com/v1alpha1
-kind: ResourcePatch
+kind: ClusterResourcePatch
 metadata:
-  name: team-b-ingress-rule
-  namespace: team-b
+  name: team-b-platform-ingress-rule
 spec:
   target:
     mode: Single
@@ -33,6 +35,7 @@ spec:
 
   serviceAccountRef:
     name: team-b-patcher
+    namespace: team-b
 
   patch:
     type: StrategicMerge
