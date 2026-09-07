@@ -240,6 +240,15 @@ spec:
                         setting. Losing this on promotion would silently break revert.
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
+                    priorValuesCaptured:
+                      description: |-
+                        PriorValuesCaptured records that the prior-value capture has already happened.
+
+                        It exists because an empty PriorValues is ambiguous without it: "nothing pre-existed at the
+                        paths this contributor claims" and "the capture has not run yet" serialise identically. Read
+                        as the latter, a second apply re-captures and records the contributor's *own* value as the
+                        prior -- and revert then dutifully restores it, leaving the contribution in place forever.
+                      type: boolean
                     priority:
                       description: Priority is copied from the contributor for deterministic
                         ordering without a second read.

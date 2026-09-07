@@ -247,8 +247,18 @@ func adoptStatus(dst, src *patchv1alpha1.SharedResourceStatus, srcNamespace, src
 			dst.Contributors = append(dst.Contributors, *srcRec.DeepCopy())
 			continue
 		}
-		if existing.PriorValues == nil && srcRec.PriorValues != nil {
-			existing.PriorValues = srcRec.PriorValues.DeepCopy()
+		// The capture flag travels with the values, and a predecessor that captured *nothing*
+		// still carries the fact that the capture happened -- dropping that lets the successor
+		// re-capture, reading back the contributor's own value as its prior. Recorded values
+		// without the flag also count as captured, so a tracker written before the flag existed
+		// still hands its bookkeeping over on upgrade.
+		if !existing.PriorValuesCaptured {
+			if srcRec.PriorValuesCaptured || srcRec.PriorValues != nil {
+				if srcRec.PriorValues != nil {
+					existing.PriorValues = srcRec.PriorValues.DeepCopy()
+				}
+				existing.PriorValuesCaptured = true
+			}
 		}
 		if len(existing.OwnedPaths) == 0 {
 			existing.OwnedPaths = append([]string(nil), srcRec.OwnedPaths...)

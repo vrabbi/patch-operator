@@ -490,6 +490,101 @@ func TestCSATwoContributorsShareAtomicIngressRules(t *testing.T) {
 	}
 }
 
+// Re-applying an unchanged contribution must not turn the contributor's own value into its
+// recorded prior. This is the bug the kind e2e job found: on the second apply the live object
+// already holds what this contributor wrote, and capturing that as the prior makes revert *restore*
+// the contribution -- so the field never goes away and no error is reported anywhere.
+func TestCSARepeatedApplyDoesNotCaptureItsOwnValueAsPrior(t *testing.T) {
+	skipWithoutEnvtest(t)
+	ctx := context.Background()
+	ns := testNamespace(t, ctx)
+
+	a := &ClientSideApplier{Client: k8sClient}
+	target := cmTarget(ns, "shared")
+	spec := &patchv1alpha1.PatchSpec{Value: rawExt(`{"data":{"k":"ours"}}`)}
+	base, err := render.DecodeBase(rawExt(`{"apiVersion":"v1","kind":"ConfigMap"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := a.Apply(ctx, Request{
+		Target: target, Contribution: mustRender(t, spec, target),
+		FieldManager: "patch-operator/a", Base: base, AllowCreate: true,
+	})
+	if err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if !first.PriorValuesCaptured {
+		t.Error("the first apply must report the capture as done, or the second repeats it")
+	}
+
+	// The second apply is the dangerous one, and it is deliberately made to look like a first
+	// apply: PriorValuesCaptured is false, exactly as it would be if the tracker's status write
+	// had been lost or conflicted.
+	second, err := a.Apply(ctx, Request{
+		Target: target, Contribution: mustRender(t, spec, target),
+		FieldManager: "patch-operator/a", PreviousPaths: first.OwnedPaths,
+		PriorValues: nil, PriorValuesCaptured: false,
+	})
+	if err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if len(second.PriorValues) != 0 {
+		t.Fatalf("the contributor's own value was recorded as a prior: %#v", second.PriorValues)
+	}
+
+	// Which means revert actually withdraws.
+	if err := a.Revert(ctx, RevertRequest{
+		Target: target, OwnedPaths: second.OwnedPaths, PriorValues: second.PriorValues,
+	}); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	if _, present := liveData(t, ctx, ns, "shared")["k"]; present {
+		t.Error("revert restored the contribution instead of withdrawing it")
+	}
+}
+
+// A value that genuinely pre-existed must still be captured and restored -- the guard above must
+// not be so broad that it breaks the reason priorValues exists.
+func TestCSAPreExistingValueIsRestoredOnRevert(t *testing.T) {
+	skipWithoutEnvtest(t)
+	ctx := context.Background()
+	ns := testNamespace(t, ctx)
+
+	// Someone else set the key first.
+	if err := ssaApply(ctx, t, configMap(ns, "shared", map[string]any{"k": "theirs"}),
+		"some-other-controller", false); err != nil {
+		t.Fatalf("foreign apply: %v", err)
+	}
+
+	a := &ClientSideApplier{Client: k8sClient}
+	target := cmTarget(ns, "shared")
+	res, err := a.Apply(ctx, Request{
+		Target: target,
+		Contribution: mustRender(t,
+			&patchv1alpha1.PatchSpec{Value: rawExt(`{"data":{"k":"ours"}}`)}, target),
+		FieldManager: "patch-operator/a",
+	})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if res.PriorValues["data.k"] != "theirs" {
+		t.Fatalf("the pre-existing value was not captured: %#v", res.PriorValues)
+	}
+	if got := liveData(t, ctx, ns, "shared"); got["k"] != "ours" {
+		t.Fatalf("the contribution did not land: %#v", got)
+	}
+
+	if err := a.Revert(ctx, RevertRequest{
+		Target: target, OwnedPaths: res.OwnedPaths, PriorValues: res.PriorValues,
+	}); err != nil {
+		t.Fatalf("revert: %v", err)
+	}
+	if got := liveData(t, ctx, ns, "shared"); got["k"] != "theirs" {
+		t.Errorf("revert deleted a pre-existing value instead of restoring it: %#v", got)
+	}
+}
+
 // ingressHosts returns the set of rule hosts on an Ingress.
 func ingressHosts(t *testing.T, ctx context.Context, ns, name string) map[string]bool {
 	t.Helper()

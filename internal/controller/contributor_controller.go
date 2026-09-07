@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	authenticationv1 "k8s.io/api/authentication/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -80,11 +81,18 @@ type ContributorReconciler[T patchv1alpha1.Contributor, L client.ObjectList] str
 // runtimeScheme is aliased so the struct field reads naturally without importing runtime here.
 type runtimeScheme = scheme
 
-// Reauthorizer re-checks that the principal recorded at admission may still make this change.
+// Reauthorizer re-checks that the identity recorded at admission may still make this change.
 type Reauthorizer interface {
-	// Authorize reports whether principal may still perform the writes this contributor implies.
-	// A false result carries a human-readable reason.
-	Authorize(ctx context.Context, principal string, c patchv1alpha1.Contributor) (bool, string, error)
+	// Authorize reports whether the recorded identity may still perform the writes this
+	// contributor implies. A false result carries a human-readable reason.
+	//
+	// It takes the whole identity rather than a username because RBAC is usually bound to groups:
+	// a review carrying only a name denies principals who are in fact still authorized.
+	Authorize(
+		ctx context.Context,
+		user authenticationv1.UserInfo,
+		c patchv1alpha1.Contributor,
+	) (bool, string, error)
 }
 
 // Reconcile brings one contributor's registration up to date.
@@ -484,19 +492,20 @@ func (r *ContributorReconciler[T, L]) reauthorize(ctx context.Context, obj T) (t
 	}
 
 	status := obj.GetPatchStatus()
-	principal := obj.GetAnnotations()[patchv1alpha1.AuthorizedAsAnnotation]
-	if principal == "" {
+	user, recorded := patchv1alpha1.IdentityFromAnnotations(obj)
+	if !recorded {
 		// No recorded principal means the object predates the webhook or bypassed it. Nothing to
 		// re-check against, so leave the condition alone rather than asserting authorization.
 		return r.ReauthorizeAfter, nil
 	}
+	principal := user.Username
 
 	if status.LastAuthorizedTime != nil &&
 		time.Since(status.LastAuthorizedTime.Time) < r.ReauthorizeAfter {
 		return r.ReauthorizeAfter - time.Since(status.LastAuthorizedTime.Time), nil
 	}
 
-	allowed, reason, err := r.Authorizer.Authorize(ctx, principal, obj)
+	allowed, reason, err := r.Authorizer.Authorize(ctx, user, obj)
 	if err != nil {
 		return r.ReauthorizeAfter, err
 	}

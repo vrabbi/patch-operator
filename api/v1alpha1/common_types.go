@@ -385,6 +385,16 @@ const (
 // webhook's patch is discarded by the API server, so it cannot annotate what it admits.
 const AuthorizedAsAnnotation = "terasky.com/authorized-as"
 
+// AuthorizedIdentityAnnotation records the admitting principal's full identity as JSON: username,
+// UID, groups and extras.
+//
+// The username alone is not enough to re-run the SubjectAccessReview. RBAC is usually bound to
+// groups, not to names -- a cluster admin authenticating by client certificate is authorized
+// through system:masters and an OIDC user through whatever groups their provider asserts -- so a
+// review carrying only the username denies a principal who is in fact still fully authorized. The
+// re-check has to ask the same question admission asked, with the same inputs.
+const AuthorizedIdentityAnnotation = "terasky.com/authorized-identity"
+
 // FieldManagerPrefix prefixes every field manager this operator uses, so a conflict can be
 // recognised as internal (arbitrable by priority) rather than foreign (never forced).
 const FieldManagerPrefix = "patch-operator/"

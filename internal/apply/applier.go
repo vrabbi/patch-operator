@@ -62,6 +62,12 @@ type Request struct {
 	// touched them. Carried forward across applies; used by revert to restore rather than delete.
 	PriorValues map[string]any
 
+	// PriorValuesCaptured reports that PriorValues is the finished capture, not an empty
+	// placeholder. Without it an applier cannot tell "nothing pre-existed" from "not captured
+	// yet", and re-capturing records the contributor's own value as the prior -- which makes
+	// revert restore the contribution instead of withdrawing it.
+	PriorValuesCaptured bool
+
 	// Base seeds a create when the target is absent. Nil for a patch-only contributor.
 	Base map[string]any
 
@@ -117,6 +123,10 @@ type Result struct {
 	// PriorValues are the values that existed at those paths before this contributor first
 	// touched them, merged with any already known. Only populated under ClientSideApply.
 	PriorValues map[string]any
+
+	// PriorValuesCaptured reports that the capture has now happened, so later applies must not
+	// repeat it. It is true even when PriorValues is empty -- that is the whole point of the flag.
+	PriorValuesCaptured bool
 
 	// Conflict is set, with no error returned, when the policy is to report rather than force.
 	Conflict *Conflict

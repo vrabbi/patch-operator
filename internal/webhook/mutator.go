@@ -75,14 +75,32 @@ func (m *PrincipalRecorder) Handle(_ context.Context, req admission.Request) adm
 		return admission.Allowed("")
 	}
 
+	stored := patchv1alpha1.RecordedIdentity{
+		Username: req.UserInfo.Username,
+		UID:      req.UserInfo.UID,
+		Groups:   req.UserInfo.Groups,
+	}
+	if len(req.UserInfo.Extra) > 0 {
+		stored.Extra = map[string][]string{}
+		for k, v := range req.UserInfo.Extra {
+			stored.Extra[k] = v
+		}
+	}
+	identity, err := json.Marshal(stored)
+	if err != nil {
+		return admission.Errored(http.StatusInternalServerError, err)
+	}
+
 	annotations := obj.GetAnnotations()
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
-	if annotations[patchv1alpha1.AuthorizedAsAnnotation] == req.UserInfo.Username {
+	if annotations[patchv1alpha1.AuthorizedAsAnnotation] == req.UserInfo.Username &&
+		annotations[patchv1alpha1.AuthorizedIdentityAnnotation] == string(identity) {
 		return admission.Allowed("")
 	}
 	annotations[patchv1alpha1.AuthorizedAsAnnotation] = req.UserInfo.Username
+	annotations[patchv1alpha1.AuthorizedIdentityAnnotation] = string(identity)
 	obj.SetAnnotations(annotations)
 
 	marshaled, err := json.Marshal(obj)
@@ -101,9 +119,13 @@ func (m *PrincipalRecorder) shouldRecord(
 	if op == OperationCreate {
 		return true
 	}
-	if obj.GetAnnotations()[patchv1alpha1.AuthorizedAsAnnotation] == "" {
-		// An object that somehow has no principal gets one, whoever is updating it. A missing
-		// annotation disables the re-check entirely, which is the worse outcome.
+	if _, recorded := patchv1alpha1.IdentityFromAnnotations(obj); !recorded {
+		// An object that somehow has no principal at all gets one, whoever is updating it: a
+		// missing annotation disables the re-check entirely, which is the worse outcome.
+		//
+		// An object carrying only the older username annotation is *not* backfilled here. It is
+		// still re-checkable, and attributing it to whoever next touches it -- most often the
+		// operator's own finalizer update -- would lose the tenant's identity to gain nothing.
 		return true
 	}
 	if len(req.OldObject.Raw) == 0 {

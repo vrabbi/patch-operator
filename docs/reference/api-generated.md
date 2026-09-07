@@ -223,6 +223,7 @@ _Appears in:_
 | `lastAppliedHash` _string_ | LastAppliedHash lets the tracker skip an apply when nothing has changed. |  | Optional: \{\} <br /> |
 | `ownedPaths` _string array_ | OwnedPaths are the field paths this contributor set. ClientSideApply bookkeeping. |  | Optional: \{\} <br /> |
 | `priorValues` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#rawextension-runtime-pkg)_ | PriorValues holds what those paths contained before this contributor first touched them,<br />for paths that already existed. ClientSideApply revert restores these rather than deleting<br />the field, which is the correct behaviour when a contributor overwrote a pre-existing<br />setting. Losing this on promotion would silently break revert. |  | Optional: \{\} <br /> |
+| `priorValuesCaptured` _boolean_ | PriorValuesCaptured records that the prior-value capture has already happened.<br />It exists because an empty PriorValues is ambiguous without it: "nothing pre-existed at the<br />paths this contributor claims" and "the capture has not run yet" serialise identically. Read<br />as the latter, a second apply re-captures and records the contributor's *own* value as the<br />prior -- and revert then dutifully restores it, leaving the contribution in place forever. |  | Optional: \{\} <br /> |
 | `creationTimestamp` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#time-v1-meta)_ | CreationTimestamp is copied for the deterministic sort, which orders by<br />(priority desc, creationTimestamp asc, uid asc). |  | Optional: \{\} <br /> |
 
 
@@ -354,6 +355,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ |  |  |  |
 | `adopted` _boolean_ | Adopted is set once the ClusterSharedResource has confirmed it holds the copied state. The<br />namespaced tracker's finalizer is released only after this. |  | Optional: \{\} <br /> |
+
+
 
 
 #### ResourcePatch

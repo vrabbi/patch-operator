@@ -783,6 +783,12 @@ re-stamps only on CREATE and on updates that change the spec — the operator's 
 must not replace the tenant's identity with the operator's (privileged) service account, which would
 make every later re-check pass vacuously.
 
+What is recorded is the *whole* identity — username, UID, groups and extras — not just the name.
+RBAC is bound to groups far more often than to usernames, so a review carrying only a name denies
+principals who are still fully authorized: a cluster admin authenticating by client certificate is
+authorized through `system:masters`, an OIDC user through their provider's groups. The re-check
+must ask the same question admission asked, with the same inputs.
+
 ### 7.3 `spec.serviceAccountRef` — impersonation
 
 The second layer, in v1alpha1 rather than deferred, and the answer to §7.4.

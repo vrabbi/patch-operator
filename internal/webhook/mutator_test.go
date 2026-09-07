@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -88,6 +89,28 @@ func annotationFromPatch(t *testing.T, req admission.Request, resp admission.Res
 		}
 	}
 	return obj.GetAnnotations()[patchv1alpha1.AuthorizedAsAnnotation]
+}
+
+// applyPatches replays a response's JSON patch onto the submitted object.
+func applyPatches(t *testing.T, req admission.Request, resp admission.Response) *patchv1alpha1.ResourcePatch {
+	t.Helper()
+	patch, err := json.Marshal(resp.Patches)
+	if err != nil {
+		t.Fatalf("marshalling patch: %v", err)
+	}
+	decoded, err := jsonpatch.DecodePatch(patch)
+	if err != nil {
+		t.Fatalf("decoding patch %s: %v", patch, err)
+	}
+	out, err := decoded.Apply(req.Object.Raw)
+	if err != nil {
+		t.Fatalf("applying patch %s: %v", patch, err)
+	}
+	obj := &patchv1alpha1.ResourcePatch{}
+	if err := json.Unmarshal(out, obj); err != nil {
+		t.Fatalf("decoding patched object: %v", err)
+	}
+	return obj
 }
 
 func TestPrincipalRecorderStampsCreator(t *testing.T) {
@@ -192,6 +215,44 @@ func TestPrincipalRecorderBackfillsMissingPrincipal(t *testing.T) {
 	got := annotationFromPatch(t, req, recorder(t).Handle(context.Background(), req))
 	if got != "carol@example.com" {
 		t.Errorf("recorded principal = %q, want carol@example.com", got)
+	}
+}
+
+// The recorded identity must carry the groups, not just the name. This is the regression the kind
+// e2e suite found: a cluster admin authenticating by client certificate is authorized through
+// system:masters, so re-checking with the username alone denied a principal that was still fully
+// authorized, the operator stopped writing, and a revert never happened.
+func TestPrincipalRecorderRecordsGroups(t *testing.T) {
+	rp := namespacedContributor(nil)
+	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		Operation: admissionv1.Create,
+		UserInfo: authenticationv1.UserInfo{
+			Username: "kubernetes-admin",
+			UID:      "uid-9",
+			Groups:   []string{"system:masters", "system:authenticated"},
+			Extra:    map[string]authenticationv1.ExtraValue{"scopes": {"a"}},
+		},
+		Object: mustJSON(t, rp),
+	}}
+
+	resp := recorder(t).Handle(context.Background(), req)
+	if !resp.Allowed {
+		t.Fatalf("denied: %v", resp.Result)
+	}
+
+	patched := applyPatches(t, req, resp)
+	user, ok := patchv1alpha1.IdentityFromAnnotations(patched)
+	if !ok {
+		t.Fatal("no identity was recorded")
+	}
+	if user.Username != "kubernetes-admin" || user.UID != "uid-9" {
+		t.Errorf("subject = %+v", user)
+	}
+	if len(user.Groups) != 2 || user.Groups[0] != "system:masters" {
+		t.Errorf("groups = %v; a group-authorized principal would be denied on re-check", user.Groups)
+	}
+	if len(user.Extra["scopes"]) != 1 {
+		t.Errorf("extra = %v", user.Extra)
 	}
 }
 

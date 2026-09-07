@@ -618,7 +618,7 @@ func TestReauthorizerAllowsAndDenies(t *testing.T) {
 
 	t.Run("allowed", func(t *testing.T) {
 		r := &Reauthorizer{Authorizer: &Authorizer{Client: &sarClient{decide: allowAll}}}
-		ok, reason, err := r.Authorize(context.Background(), "alice", c)
+		ok, reason, err := r.Authorize(context.Background(), authenticationv1.UserInfo{Username: "alice"}, c)
 		if err != nil || !ok {
 			t.Fatalf("ok=%v reason=%q err=%v", ok, reason, err)
 		}
@@ -630,7 +630,7 @@ func TestReauthorizerAllowsAndDenies(t *testing.T) {
 				return false, false, "binding removed"
 			},
 		}}}
-		ok, reason, err := r.Authorize(context.Background(), "alice", c)
+		ok, reason, err := r.Authorize(context.Background(), authenticationv1.UserInfo{Username: "alice"}, c)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -650,8 +650,8 @@ func TestReauthorizerAttachesServiceAccountGroups(t *testing.T) {
 	sc := &sarClient{decide: allowAll}
 	r := &Reauthorizer{Authorizer: &Authorizer{Client: sc}}
 
-	if _, _, err := r.Authorize(context.Background(),
-		"system:serviceaccount:team-a:patcher", namespacedContributor(nil)); err != nil {
+	sa := authenticationv1.UserInfo{Username: "system:serviceaccount:team-a:patcher"}
+	if _, _, err := r.Authorize(context.Background(), sa, namespacedContributor(nil)); err != nil {
 		t.Fatal(err)
 	}
 	if len(sc.calls) == 0 {
@@ -663,13 +663,65 @@ func TestReauthorizerAttachesServiceAccountGroups(t *testing.T) {
 	}
 }
 
+// The regression the kind e2e suite found. kubernetes-admin is authorized through system:masters,
+// not by name, so a review carrying only the username denied a principal that was still fully
+// authorized -- the operator stopped writing and a pending revert never completed.
+func TestReauthorizerForwardsRecordedGroups(t *testing.T) {
+	sc := &sarClient{decide: func(sar *authv1.SubjectAccessReview) (bool, bool, string) {
+		// Stands in for RBAC bound to a group rather than a username.
+		for _, g := range sar.Spec.Groups {
+			if g == "system:masters" {
+				return true, false, ""
+			}
+		}
+		return false, false, "no binding for user " + sar.Spec.User
+	}}
+	r := &Reauthorizer{Authorizer: &Authorizer{Client: sc}}
+
+	user := authenticationv1.UserInfo{
+		Username: "kubernetes-admin",
+		Groups:   []string{"system:masters", "system:authenticated"},
+	}
+	ok, reason, err := r.Authorize(context.Background(), user, namespacedContributor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatalf("a group-authorized principal was denied on re-check: %s", reason)
+	}
+	if len(sc.calls) == 0 {
+		t.Fatal("no SubjectAccessReview issued")
+	}
+	if len(sc.calls[0].Spec.Groups) != 2 {
+		t.Errorf("groups were not forwarded: %+v", sc.calls[0].Spec)
+	}
+}
+
+// The reconstructed ServiceAccount groups must not overwrite groups that were actually recorded.
+func TestReauthorizerKeepsRecordedServiceAccountGroups(t *testing.T) {
+	sc := &sarClient{decide: allowAll}
+	r := &Reauthorizer{Authorizer: &Authorizer{Client: sc}}
+
+	user := authenticationv1.UserInfo{
+		Username: "system:serviceaccount:team-a:patcher",
+		Groups:   []string{"system:serviceaccounts:team-a", "custom-group"},
+	}
+	if _, _, err := r.Authorize(context.Background(), user, namespacedContributor(nil)); err != nil {
+		t.Fatal(err)
+	}
+	got := sc.calls[0].Spec.Groups
+	if len(got) != 2 || got[1] != "custom-group" {
+		t.Errorf("recorded groups were replaced by reconstructed ones: %v", got)
+	}
+}
+
 func TestReauthorizerReportsInvalidSpec(t *testing.T) {
 	c := namespacedContributor(func(rp *patchv1alpha1.ResourcePatch) {
 		rp.Spec.Target.APIVersion = "a/b/c"
 	})
 	r := &Reauthorizer{Authorizer: &Authorizer{Client: &sarClient{decide: allowAll}}}
 
-	ok, reason, err := r.Authorize(context.Background(), "alice", c)
+	ok, reason, err := r.Authorize(context.Background(), authenticationv1.UserInfo{Username: "alice"}, c)
 	if err != nil {
 		t.Fatal(err)
 	}

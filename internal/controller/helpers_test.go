@@ -445,6 +445,11 @@ func TestAdoptStatusCarriesProvenanceAndPriorValues(t *testing.T) {
 	if got.PriorValues == nil {
 		t.Error("priorValues were not filled in; revert would delete instead of restore")
 	}
+	// Recorded values imply the capture happened, even on a predecessor written before the flag
+	// existed. Without carrying that, the successor re-captures and revert becomes a no-op.
+	if !got.PriorValuesCaptured {
+		t.Error("priorValuesCaptured was not carried over; the successor would re-capture")
+	}
 	if len(got.OwnedPaths) != 1 || got.OwnedPaths[0] != "data.k" {
 		t.Errorf("ownedPaths not filled in: %v", got.OwnedPaths)
 	}
@@ -452,6 +457,23 @@ func TestAdoptStatusCarriesProvenanceAndPriorValues(t *testing.T) {
 	// The successor is never itself fenced: promotion is one-way.
 	if dst.PromotedTo != nil {
 		t.Error("the successor must not be fenced")
+	}
+
+	// A predecessor whose contributor's paths pre-existed nowhere captured no values, but the
+	// capture still happened. That fact is the thing the successor must not lose.
+	emptySrc := &patchv1alpha1.SharedResourceStatus{
+		Contributors: []patchv1alpha1.ContributorStatus{{
+			PatchRef:            creator,
+			OwnedPaths:          []string{"data.k"},
+			PriorValuesCaptured: true,
+		}},
+	}
+	emptyDst := &patchv1alpha1.SharedResourceStatus{
+		Contributors: []patchv1alpha1.ContributorStatus{{PatchRef: creator}},
+	}
+	adoptStatus(emptyDst, emptySrc, "team-b", "old-tracker")
+	if !emptyDst.Contributors[0].PriorValuesCaptured {
+		t.Error("an empty-but-complete capture was not carried over")
 	}
 	if dst.ContributorCount != 1 {
 		t.Errorf("contributorCount = %d, want 1", dst.ContributorCount)

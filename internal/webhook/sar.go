@@ -385,9 +385,15 @@ type Reauthorizer struct {
 }
 
 // Authorize implements the controller's Reauthorizer interface.
+//
+// The identity comes from the annotations the PrincipalRecorder wrote, groups included. Asking
+// with the username alone would deny nearly every real principal: RBAC is bound to groups far more
+// often than to names, so a cluster admin authenticating by client certificate (authorized through
+// system:masters) or an OIDC user (authorized through their provider's groups) would look
+// unauthorized to a review that does not carry them.
 func (r *Reauthorizer) Authorize(
 	ctx context.Context,
-	principal string,
+	user authenticationv1.UserInfo,
 	c patchv1alpha1.Contributor,
 ) (bool, string, error) {
 	checks, err := ChecksFor(OperationCreate, c, nil, r.Authorizer.ResourceFor)
@@ -395,11 +401,10 @@ func (r *Reauthorizer) Authorize(
 		return false, err.Error(), nil
 	}
 
-	user := authenticationv1.UserInfo{Username: principal}
-	// A ServiceAccount principal carries the groups the API server would attach, or an RBAC
-	// binding to system:serviceaccounts would not be honoured and the re-check would deny a
-	// contributor that is in fact still authorized.
-	if strings.HasPrefix(principal, "system:serviceaccount:") {
+	// A ServiceAccount recorded before the identity annotation existed carries no groups, so the
+	// ones the API server would attach are reconstructed; without them an RBAC binding to
+	// system:serviceaccounts would not be honoured.
+	if len(user.Groups) == 0 && strings.HasPrefix(user.Username, "system:serviceaccount:") {
 		user.Groups = []string{"system:serviceaccounts", "system:authenticated"}
 	}
 
@@ -408,7 +413,8 @@ func (r *Reauthorizer) Authorize(
 		return false, "", err
 	}
 	if denial != nil {
-		return false, fmt.Sprintf("%s may no longer %s: %s", principal, denial.Check, denial.Reason), nil
+		return false,
+			fmt.Sprintf("%s may no longer %s: %s", user.Username, denial.Check, denial.Reason), nil
 	}
 	return true, "", nil
 }

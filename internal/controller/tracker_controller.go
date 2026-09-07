@@ -346,6 +346,7 @@ func recordFor(
 		rec.LastAppliedHash = prev.LastAppliedHash
 		rec.OwnedPaths = prev.OwnedPaths
 		rec.PriorValues = prev.PriorValues
+		rec.PriorValuesCaptured = prev.PriorValuesCaptured
 		rec.State = prev.State
 	}
 	if rec.FieldManager == "" {
@@ -458,8 +459,11 @@ func (r *TrackerReconciler[T, L]) reconcileContributions(
 			MergeKeys:      spec.Patch.MergeKeys,
 			PreviousPaths:  previous,
 			PriorValues:    priors,
-			Base:           base,
-			AllowCreate:    spec.Lifecycle.OnMissing == patchv1alpha1.OnMissingCreate,
+			// Whether the capture already happened cannot be read off the values themselves: a
+			// contributor claiming paths that pre-existed nowhere records none, legitimately.
+			PriorValuesCaptured: rec.PriorValuesCaptured,
+			Base:                base,
+			AllowCreate:         spec.Lifecycle.OnMissing == patchv1alpha1.OnMissingCreate,
 		})
 
 		switch {
@@ -526,12 +530,13 @@ func (r *TrackerReconciler[T, L]) reconcileContributions(
 		rec.State = patchv1alpha1.ContributorStateApplied
 		rec.LastAppliedHash = contribution.Hash
 		rec.OwnedPaths = render.PathStrings(result.OwnedPaths)
-		if result.PriorValues != nil {
+		if result.PriorValuesCaptured {
 			encoded, err := encodePriorValues(result.PriorValues)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
 			rec.PriorValues = encoded
+			rec.PriorValuesCaptured = true
 		}
 		if result.Live != nil {
 			status.ObservedResourceVersion = result.Live.GetResourceVersion()

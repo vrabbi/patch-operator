@@ -106,6 +106,15 @@ type ContributorStatus struct {
 	// +optional
 	PriorValues *runtime.RawExtension `json:"priorValues,omitempty"`
 
+	// PriorValuesCaptured records that the prior-value capture has already happened.
+	//
+	// It exists because an empty PriorValues is ambiguous without it: "nothing pre-existed at the
+	// paths this contributor claims" and "the capture has not run yet" serialise identically. Read
+	// as the latter, a second apply re-captures and records the contributor's *own* value as the
+	// prior -- and revert then dutifully restores it, leaving the contribution in place forever.
+	// +optional
+	PriorValuesCaptured bool `json:"priorValuesCaptured,omitempty"`
+
 	// CreationTimestamp is copied for the deterministic sort, which orders by
 	// (priority desc, creationTimestamp asc, uid asc).
 	// +optional

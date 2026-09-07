@@ -17,7 +17,9 @@ limitations under the License.
 package apply
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -101,8 +103,10 @@ func (a *ClientSideApplier) create(ctx context.Context, req Request) (*Result, e
 		Live:       obj,
 		OwnedPaths: req.Contribution.Paths,
 		// Nothing pre-existed a target this contributor just created, so there is nothing to
-		// restore on revert.
-		PriorValues: map[string]any{},
+		// restore on revert -- and the capture is finished, which the flag has to say explicitly
+		// or the next apply would record this contributor's own values as the priors.
+		PriorValues:         map[string]any{},
+		PriorValuesCaptured: true,
 	}, nil
 }
 
@@ -115,20 +119,40 @@ func (a *ClientSideApplier) update(
 ) (*Result, error) {
 	desired := live.DeepCopy()
 
-	// Capture what the target holds at each claimed path *before* touching it. Only paths not
-	// already recorded are captured: the first capture is the true prior value, and re-capturing
-	// on a later apply would record this contributor's own value and make revert a no-op.
+	// Capture what the target holds at each claimed path *before* touching it, and only ever
+	// once. Re-capturing on a later apply would read back this contributor's own value and record
+	// it as the prior, so revert would restore the contribution instead of withdrawing it -- a
+	// silent no-op, the target keeping a field whose contributor is gone.
+	//
+	// "Already captured" cannot be inferred from a non-empty PriorValues: a contributor whose
+	// paths pre-existed nowhere legitimately captures nothing. Hence the explicit flag.
 	priors := map[string]any{}
 	for k, v := range req.PriorValues {
 		priors[k] = v
 	}
-	for _, p := range req.Contribution.Paths {
-		key := p.String()
-		if _, known := priors[key]; known {
-			continue
-		}
-		if existing, found := render.Get(live.Object, p); found {
-			priors[key] = render.DeepCopyValue(existing)
+	if !req.PriorValuesCaptured {
+		for _, p := range req.Contribution.Paths {
+			if _, known := priors[p.String()]; known {
+				// A prior already recorded for this path is the true one. Replacing it with what
+				// the target holds now would substitute a later value -- possibly this
+				// contributor's own -- for the one that actually pre-existed.
+				continue
+			}
+			existing, found := render.Get(live.Object, p)
+			if !found {
+				continue
+			}
+			// A live value identical to what this contributor is about to write is not a prior,
+			// whoever put it there. This guard is not redundant with the flag above: the flag
+			// lives in the tracker's status, so a status write that is lost or conflicts leaves a
+			// second apply believing it is the first -- and it would then read back its own value
+			// and record that as the prior. Revert would restore the contribution instead of
+			// withdrawing it, which is a silent leak with no error anywhere. Comparing values
+			// closes that regardless of write ordering.
+			if want, ok := render.Get(req.Contribution.Object, p); ok && sameValue(existing, want) {
+				continue
+			}
+			priors[p.String()] = render.DeepCopyValue(existing)
 		}
 	}
 
@@ -160,10 +184,11 @@ func (a *ClientSideApplier) update(
 
 	if equalContent(live.Object, desired.Object) {
 		return &Result{
-			Changed:     false,
-			Live:        live,
-			OwnedPaths:  req.Contribution.Paths,
-			PriorValues: priors,
+			Changed:             false,
+			Live:                live,
+			OwnedPaths:          req.Contribution.Paths,
+			PriorValues:         priors,
+			PriorValuesCaptured: true,
 		}, nil
 	}
 
@@ -174,10 +199,11 @@ func (a *ClientSideApplier) update(
 	}
 
 	return &Result{
-		Changed:     true,
-		Live:        desired,
-		OwnedPaths:  req.Contribution.Paths,
-		PriorValues: priors,
+		Changed:             true,
+		Live:                desired,
+		OwnedPaths:          req.Contribution.Paths,
+		PriorValues:         priors,
+		PriorValuesCaptured: true,
 	}, nil
 }
 
@@ -205,6 +231,23 @@ func (a *ClientSideApplier) Revert(ctx context.Context, req RevertRequest) error
 		return nil
 	}
 	return a.Client.Update(ctx, desired)
+}
+
+// sameValue compares two decoded JSON values by their canonical encoding.
+//
+// Not reflect.DeepEqual: the live object's numbers arrive as int64 through unstructured, while a
+// rendered contribution's arrive as float64 from json.Unmarshal, so a port number equal in every
+// meaningful sense compares unequal. Marshalling normalises both, and Go sorts map keys.
+func sameValue(a, b any) bool {
+	ab, err := json.Marshal(a)
+	if err != nil {
+		return false
+	}
+	bb, err := json.Marshal(b)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(ab, bb)
 }
 
 // restoreOrDelete puts back the prior value at p if one was recorded, otherwise removes the path.

@@ -73,14 +73,25 @@ CSA keeps real bookkeeping. For each contributor the tracker records:
 - **`ownedPaths`** — what this contributor set.
 - **`priorValues`** — what those paths held *before* this contributor first touched them, for paths
   that already existed.
+- **`priorValuesCaptured`** — that the capture has happened. Needed because an empty `priorValues`
+  is otherwise ambiguous: "nothing pre-existed" and "not captured yet" look identical.
 
 Revert then **restores the original value rather than deleting the field** — which is the correct
 behaviour when a contributor overwrote a pre-existing setting rather than adding a new one, and is
 something SSA cannot express.
 
 !!! note "Captured once, never re-captured"
-    Re-deriving `priorValues` on a later apply would record the contributor's *own* value and make
-    revert a no-op. The first capture wins, permanently.
+    Re-deriving `priorValues` on a later apply would record the contributor's *own* value, and
+    revert would then dutifully **restore the contribution instead of withdrawing it** — the field
+    stays on the target forever, with no error anywhere. The first capture wins, permanently.
+
+    Three independent guards enforce that, because getting it wrong is silent:
+
+    1. `priorValuesCaptured` in the tracker's status short-circuits any later capture.
+    2. A path already present in `priorValues` is never overwritten.
+    3. A live value **equal to what this contributor is about to write** is never recorded as a
+       prior. This one does not depend on any status write having landed, which matters: a lost or
+       conflicting status update would otherwise leave a second apply believing it is the first.
 
 Two rules about that bookkeeping:
 

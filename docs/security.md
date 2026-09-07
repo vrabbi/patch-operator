@@ -99,7 +99,15 @@ The annotation is written by a **separate mutating webhook**, not by the validat
 can only admit or deny. Mutating admission runs first, so the validator still sees the final
 object and remains the authorization boundary; the mutator does no SAR of its own.
 
-Two details in that mutator matter:
+It records **the whole identity**, not just the name: `terasky.com/authorized-as` carries the
+username for humans to read, and `terasky.com/authorized-identity` carries username, UID, groups
+and extras as JSON. Groups are the part that matters — RBAC is bound to them far more often than to
+usernames, so a review carrying only a name denies a principal who is still fully authorized. A
+cluster admin authenticating by client certificate is authorized through `system:masters`; an OIDC
+user through whatever groups their provider asserts. The re-check has to ask the same question
+admission asked, with the same inputs.
+
+Two further details in that mutator matter:
 
 - The annotation is **always overwritten with the authenticated identity**, so a principal a
   submitter writes into their own manifest is never believed.

@@ -24,7 +24,7 @@ sequenceDiagram
     CRP->>SR: 1. commit status.promotedTo (FENCE)
     Note over SR: from this commit it writes nothing
     CRP->>CSR: 2. create + copy state
-    Note over CSR: contributors, ownedPaths, priorValues,<br/>createdByOperator, creatorPatchRef,<br/>observedTargetUID, observedBaseHash
+    Note over CSR: contributors, ownedPaths, priorValues,<br/>priorValuesCaptured,<br/>createdByOperator, creatorPatchRef,<br/>observedTargetUID, observedBaseHash
     CRP->>SR: 3. mark promotedTo.adopted
     SR->>SR: 4. release finalizer, delete
     Note over T: never written during any of this
