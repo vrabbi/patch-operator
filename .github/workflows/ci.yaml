@@ -41,11 +41,12 @@ jobs:
           cache: true
       # A stale CRD or RBAC manifest is a silent deployment bug: the cluster gets a schema that
       # does not match the code. Regenerating and diffing catches it here instead.
-      - run: make manifests generate
+      # The API reference is generated from the Go types, so it cannot drift from them.
+      - run: make manifests generate api-docs
       - name: Fail if regeneration changed anything
         run: |
           if ! git diff --exit-code; then
-            echo "::error::Generated files are out of date. Run 'make manifests generate' and commit the result."
+            echo "::error::Generated files are out of date. Run 'make manifests generate api-docs' and commit the result."
             exit 1
           fi
 

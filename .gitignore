@@ -4,3 +4,4 @@ cover-unit.out
 site/
 __pycache__/
 *.test
+.cache/

@@ -1,0 +1,9 @@
+processor:
+  # List types carry nothing a reader needs.
+  ignoreTypes:
+    - "(Cluster)?(ResourcePatch|SharedResource)List$"
+  ignoreFields:
+    - "TypeMeta$"
+
+render:
+  kubernetesVersion: 1.34

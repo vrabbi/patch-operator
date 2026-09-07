@@ -181,3 +181,19 @@ mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)
 endef
+
+CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
+CRD_REF_DOCS_VERSION ?= v0.1.0
+
+.PHONY: crd-ref-docs
+crd-ref-docs: $(CRD_REF_DOCS)
+$(CRD_REF_DOCS): $(LOCALBIN)
+	$(call go-install-tool,$(CRD_REF_DOCS),github.com/elastic/crd-ref-docs,$(CRD_REF_DOCS_VERSION))
+
+.PHONY: api-docs
+api-docs: crd-ref-docs ## Generate the API reference from the Go types.
+	$(CRD_REF_DOCS) \
+		--source-path=./api \
+		--config=hack/crd-ref-docs.yaml \
+		--renderer=markdown \
+		--output-path=docs/reference/api-generated.md
