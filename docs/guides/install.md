@@ -12,7 +12,10 @@ kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=5m
 
 ## Full install
 
-Installs all four CRDs, the operator, and the admission webhooks.
+Installs all four CRDs, the operator, and the admission webhooks -- a
+`ValidatingWebhookConfiguration` holding the authorization boundary and a small
+`MutatingWebhookConfiguration` that records the admitting principal (see
+[Security](../security.md#re-checking-after-admission) for why that has to be a second webhook).
 
 ```bash
 git clone https://github.com/vrabbi/patch-operator

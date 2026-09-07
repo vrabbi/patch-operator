@@ -133,6 +133,7 @@ created and any XR composing one blocks**.
 ```bash
 kubectl -n patch-operator-system get pods
 kubectl get validatingwebhookconfiguration patch-operator-validating-webhook-configuration -o yaml
+kubectl get mutatingwebhookconfiguration patch-operator-mutating-webhook-configuration -o yaml
 # cert-manager must have populated caBundle
 kubectl -n patch-operator-system get secret webhook-server-cert
 ```
