@@ -32,7 +32,10 @@ package controller
 // "impersonate" SubjectAccessReview against the requesting principal, so naming a ServiceAccount
 // is a way to drop privilege rather than borrow it.
 
-// Contributor and tracker CRDs.
+// Contributor and tracker CRDs. These markers must stay on one line for controller-gen to parse
+// them, so the line-length lint is waived for this file.
+//
+//nolint:lll
 //+kubebuilder:rbac:groups=terasky.com,resources=resourcepatches;clusterresourcepatches;sharedresources;clustersharedresources,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=terasky.com,resources=resourcepatches/status;clusterresourcepatches/status;sharedresources/status;clustersharedresources/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=terasky.com,resources=resourcepatches/finalizers;clusterresourcepatches/finalizers;sharedresources/finalizers;clustersharedresources/finalizers,verbs=update

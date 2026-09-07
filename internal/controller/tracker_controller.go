@@ -26,10 +26,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -40,6 +43,7 @@ import (
 	"github.com/vrabbi/patch-operator/internal/impersonate"
 	"github.com/vrabbi/patch-operator/internal/render"
 	"github.com/vrabbi/patch-operator/internal/scope"
+	"github.com/vrabbi/patch-operator/internal/targetcache"
 )
 
 // TrackerReconciler is the only code path that writes to a target object.
@@ -59,6 +63,14 @@ type TrackerReconciler[T patchv1alpha1.Tracker, L client.ObjectList] struct {
 
 	// Impersonation hands out the client each contributor's writes run as.
 	Impersonation *impersonate.Factory
+
+	// TargetCache starts the per-GVK informers that notice drift on a target, and notice a target
+	// appearing after a contributor has been waiting for it. Optional: without it the tracker
+	// still converges, but only on the requeue interval rather than on the event.
+	TargetCache *targetcache.Manager
+
+	// ctrl is retained so target watches can be added lazily, after the controller has started.
+	ctrl ctrlcontroller.Controller
 }
 
 // Reconcile brings one target up to date with every contributor that claims it.
@@ -89,6 +101,10 @@ func (r *TrackerReconciler[T, L]) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Start watching this target's kind, so drift is corrected and a target appearing later wakes
+	// the contributors waiting for it. Idempotent after the first call for a GVK.
+	r.ensureTargetWatch(ctx, tracker)
+
 	// Rebuild the contributor list from a live list rather than trusting status. Status is derived
 	// state, so a missed watch event or a lost update self-heals here instead of corrupting the
 	// reference count — and an incomplete count deletes objects that are still in use.
@@ -102,6 +118,70 @@ func (r *TrackerReconciler[T, L]) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	return r.reconcileContributions(ctx, tracker, contributors)
+}
+
+// ensureTargetWatch lazily starts an informer for this tracker's target kind.
+//
+// Failures are logged rather than returned: the tracker still converges on its requeue interval,
+// so a watch that cannot be established degrades responsiveness rather than correctness.
+func (r *TrackerReconciler[T, L]) ensureTargetWatch(ctx context.Context, tracker T) {
+	if r.TargetCache == nil || r.ctrl == nil {
+		return
+	}
+
+	ref := tracker.GetTrackerSpec().TargetRef
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return
+	}
+	gvk := gv.WithKind(ref.Kind)
+
+	trackerKind := tracker.TrackerKind()
+	mapFn := func(mapCtx context.Context, obj *unstructured.Unstructured) []reconcile.Request {
+		key := scope.TargetKey{
+			APIVersion: obj.GetAPIVersion(),
+			Kind:       obj.GetKind(),
+			Namespace:  obj.GetNamespace(),
+			Name:       obj.GetName(),
+		}
+
+		// A target maps to whichever tracker kind owns it, at a deterministic name.
+		owns := false
+		for _, hasCluster := range []bool{false, true} {
+			if scope.TrackerKindFor(key, hasCluster) == trackerKind {
+				owns = true
+				break
+			}
+		}
+		if !owns {
+			return nil
+		}
+
+		req := reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: scope.TrackerNamespace(trackerKind, key),
+			Name:      scope.TrackerName(key),
+		}}
+
+		// Only enqueue if a tracker actually exists for this object.
+		//
+		// The informer covers every object of the kind, not just managed ones -- watching
+		// ConfigMaps means seeing every namespace's kube-root-ca.crt. Enqueueing all of them would
+		// swamp the work queue with requests for trackers that do not exist and starve the real
+		// work. This is a cached read, so the filter is cheap.
+		probe, err := emptyTracker(trackerKind)
+		if err != nil {
+			return nil
+		}
+		if err := r.Client.Get(mapCtx, req.NamespacedName, probe); err != nil {
+			return nil
+		}
+		return []reconcile.Request{req}
+	}
+
+	if err := r.TargetCache.Ensure(ctx, trackerKind, r.ctrl, gvk, mapFn); err != nil {
+		log.FromContext(ctx).V(1).Info("could not watch the target kind; relying on requeue",
+			"gvk", gvk.String(), "error", err.Error())
+	}
 }
 
 // contributorRecord pairs a live contributor with the tracker's record of it.
@@ -123,8 +203,8 @@ func (r *TrackerReconciler[T, L]) listContributors(
 		Name:       ref.Name,
 	}
 
-	var out []contributorRecord
 	existing := tracker.GetTrackerStatus()
+	out := make([]contributorRecord, 0, len(existing.Contributors))
 
 	// Namespaced contributors. A namespaced tracker looks only in its own namespace, which keeps
 	// its lookups cheap; a cluster tracker must look everywhere, since after a promotion it holds
@@ -300,6 +380,16 @@ func (r *TrackerReconciler[T, L]) reconcileContributions(
 		}
 	}
 
+	// The object-level decision belongs here, at the moment the contributor list would empty --
+	// not when the tracker itself is deleted. DESIGN.md 6.2: the target goes only when the LAST
+	// contributor leaves, and only if that contributor created it. A creator leaving while others
+	// remain must not take the object with it.
+	if len(active) == 0 && len(releasing) > 0 {
+		if err := r.maybeDeleteTarget(ctx, tracker, releasing, target); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Re-list is unnecessary: the released contributors are dropped from the records below.
 	records := make([]patchv1alpha1.ContributorStatus, 0, len(active))
 	conflicts := []patchv1alpha1.ConflictStatus{}
@@ -382,19 +472,21 @@ func (r *TrackerReconciler[T, L]) reconcileContributions(
 
 		case apierrors.IsAlreadyExists(err), apierrors.IsConflict(err):
 			// A concurrent creator or writer. Requeue and converge.
-			logger.V(1).Info("target changed under us; requeueing", "error", err.Error())
-			records = append(records, rec)
-			if statusErr := r.writeStatus(ctx, tracker, records, conflicts); statusErr != nil {
-				return ctrl.Result{}, statusErr
-			}
-			return ctrl.Result{RequeueAfter: time.Second}, nil
+			//
+			// Deliberately without writing status: `records` covers only the contributors
+			// processed so far, and persisting it would truncate the contributor list -- which is
+			// the reference count. An undercount deletes objects that are still in use, so a
+			// partial write is worse than no write.
+			logger.V(1).Info("target changed under us; requeueing without writing a partial status",
+				"error", err.Error())
+			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 
 		case err != nil:
-			rec.State = patchv1alpha1.ContributorStateConflicted
-			records = append(records, rec)
+			// Same reasoning: report the failure on the condition, but do not persist a truncated
+			// contributor list alongside it.
 			setTrackerCond(status, patchv1alpha1.ConditionSynced, metav1.ConditionFalse,
 				patchv1alpha1.ReasonApplyFailed, err.Error())
-			if statusErr := r.writeStatus(ctx, tracker, records, conflicts); statusErr != nil {
+			if statusErr := r.writeStatus(ctx, tracker, nil, conflicts); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
 			return ctrl.Result{}, err
@@ -412,16 +504,22 @@ func (r *TrackerReconciler[T, L]) reconcileContributions(
 			continue
 		}
 
-		// The creator is recorded once and never overwritten. Only this contributor may ever
-		// delete the target, and losing the record would quietly retire that protection.
+		// The creator is recorded once, immediately, and never overwritten.
+		//
+		// Persisting it here rather than with the rest of the status at the end of the loop is
+		// deliberate: this is one-shot information. If a later contributor in this same loop hits a
+		// retryable error and the pass returns without writing, the fact would be lost for good --
+		// every subsequent reconcile finds the target already existing and reports Created=false.
+		// Losing it retires the rule that only the creating contributor may delete the target.
 		if result.Created && status.CreatorPatchRef == nil {
-			created := rec.PatchRef
-			status.CreatedByOperator = true
-			status.CreatorPatchRef = &created
+			baseHash := ""
 			if base != nil {
-				if h, err := render.HashObject(base); err == nil {
-					status.ObservedBaseHash = h
+				if h, hashErr := render.HashObject(base); hashErr == nil {
+					baseHash = h
 				}
+			}
+			if provErr := r.recordProvenance(ctx, tracker, rec.PatchRef, baseHash); provErr != nil {
+				return ctrl.Result{}, provErr
 			}
 		}
 
@@ -444,11 +542,16 @@ func (r *TrackerReconciler[T, L]) reconcileContributions(
 		records = append(records, rec)
 	}
 
+	requeueAfter := time.Duration(0)
+
 	switch {
 	case !targetExists:
 		status.Phase = patchv1alpha1.TrackerPhaseWaiting
 		setTrackerCond(status, patchv1alpha1.ConditionTargetFound, metav1.ConditionFalse,
 			patchv1alpha1.ReasonTargetMissing, "the target does not exist and no contributor creates it")
+		// Poll as well as watch. The watch is the fast path, but a tracker whose target kind could
+		// not be watched -- past the GVK cap, or explicitly disabled -- must still converge.
+		requeueAfter = 10 * time.Second
 	case anyConflict:
 		status.Phase = patchv1alpha1.TrackerPhaseConflicted
 		setTrackerCond(status, patchv1alpha1.ConditionConflict, metav1.ConditionTrue,
@@ -462,7 +565,7 @@ func (r *TrackerReconciler[T, L]) reconcileContributions(
 	}
 	setTrackerCond(status, patchv1alpha1.ConditionSynced, metav1.ConditionTrue, "ReconcileSuccess", "")
 
-	return ctrl.Result{}, r.writeStatus(ctx, tracker, records, conflicts)
+	return ctrl.Result{RequeueAfter: requeueAfter}, r.writeStatus(ctx, tracker, records, conflicts)
 }
 
 // renderAll renders every active contribution.
@@ -630,20 +733,115 @@ func (r *TrackerReconciler[T, L]) applierFor(c patchv1alpha1.Contributor) (apply
 	return apply.For(c.GetPatchSpec().Apply.Mode, writer)
 }
 
-// writeStatus persists the tracker's derived state.
+// patchStatus applies mutate to the tracker's status and persists it, re-reading on conflict.
+//
+// Mutating a freshly-read object rather than re-sending a whole computed status is what keeps two
+// writers on one status subresource from clobbering each other. The tracker controller owns the
+// contributor list, phase and conditions; the contributor controller owns the promotion fence
+// (promotedTo). A blind whole-status retry would silently drop whichever field the other actor had
+// just set -- which is how a committed fence got cleared and a promotion stalled.
+func (r *TrackerReconciler[T, L]) patchStatus(
+	ctx context.Context,
+	tracker T,
+	mutate func(*patchv1alpha1.SharedResourceStatus),
+) error {
+	key := client.ObjectKeyFromObject(tracker)
+
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		mutate(tracker.GetTrackerStatus())
+		updateErr := r.Client.Status().Update(ctx, tracker)
+		if updateErr == nil || !apierrors.IsConflict(updateErr) {
+			return updateErr
+		}
+		// Re-read and re-apply the mutation to the current object, so fields another actor set in
+		// the meantime survive.
+		fresh := r.New()
+		if err := r.Client.Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		mutate(fresh.GetTrackerStatus())
+		if err := r.Client.Status().Update(ctx, fresh); err != nil {
+			return err
+		}
+		// Keep the caller's object current for any later write in this reconcile.
+		fresh.GetTrackerStatus().DeepCopyInto(tracker.GetTrackerStatus())
+		tracker.SetResourceVersion(fresh.GetResourceVersion())
+		return nil
+	})
+
+	// A tracker deleted while its status was being written is a normal outcome, not a failure:
+	// reconcileEmpty and finishPromotion both delete trackers, and a requeued event can arrive
+	// afterwards.
+	return client.IgnoreNotFound(err)
+}
+
+// writeStatus persists the contributor list, conflicts and count.
+//
+// A nil records means "leave the contributor list alone" -- used on paths that computed only part
+// of it. Persisting a partial list would truncate the reference count, and an undercount deletes
+// objects that are still in use.
 func (r *TrackerReconciler[T, L]) writeStatus(
 	ctx context.Context,
 	tracker T,
 	records []patchv1alpha1.ContributorStatus,
 	conflicts []patchv1alpha1.ConflictStatus,
 ) error {
-	status := tracker.GetTrackerStatus()
-	if records != nil || len(status.Contributors) > 0 {
-		status.Contributors = records
-	}
-	status.ContributorCount = int32(len(status.Contributors))
-	status.Conflicts = conflicts
-	return r.Client.Status().Update(ctx, tracker)
+	// Snapshot what this pass computed, including the phase and conditions already set on the
+	// in-memory status, so the mutation is idempotent across retries.
+	computed := tracker.GetTrackerStatus().DeepCopy()
+
+	return r.patchStatus(ctx, tracker, func(st *patchv1alpha1.SharedResourceStatus) {
+		if records != nil {
+			st.Contributors = records
+		}
+		st.ContributorCount = int32(len(st.Contributors))
+		st.Conflicts = conflicts
+		st.Phase = computed.Phase
+		st.Conditions = computed.Conditions
+		// Provenance is carried across only when this pass actually learned it; otherwise whatever
+		// is already stored wins. It is discovered exactly once, at creation.
+		if computed.CreatedByOperator {
+			st.CreatedByOperator = true
+		}
+		if computed.CreatorPatchRef != nil && st.CreatorPatchRef == nil {
+			st.CreatorPatchRef = computed.CreatorPatchRef.DeepCopy()
+		}
+		if computed.ObservedBaseHash != "" && st.ObservedBaseHash == "" {
+			st.ObservedBaseHash = computed.ObservedBaseHash
+		}
+		if computed.ObservedTargetUID != "" {
+			st.ObservedTargetUID = computed.ObservedTargetUID
+		}
+		if computed.ObservedResourceVersion != "" {
+			st.ObservedResourceVersion = computed.ObservedResourceVersion
+		}
+		// promotedTo is deliberately untouched: it belongs to the contributor controller, and the
+		// fence must survive any status write the tracker makes.
+	})
+}
+
+// recordProvenance persists "the operator created this target, and this contributor did it".
+//
+// It is written the moment it is learned rather than batched with the rest of the status, because
+// it is one-shot information: on every later reconcile the target already exists, so nothing
+// reports Created again. Losing it would silently retire the rule that only the creating
+// contributor may delete the target.
+func (r *TrackerReconciler[T, L]) recordProvenance(
+	ctx context.Context,
+	tracker T,
+	creator patchv1alpha1.ContributorRef,
+	baseHash string,
+) error {
+	return r.patchStatus(ctx, tracker, func(st *patchv1alpha1.SharedResourceStatus) {
+		st.CreatedByOperator = true
+		if st.CreatorPatchRef == nil {
+			ref := creator
+			st.CreatorPatchRef = &ref
+		}
+		if baseHash != "" && st.ObservedBaseHash == "" {
+			st.ObservedBaseHash = baseHash
+		}
+	})
 }
 
 // SetupWithManager wires the controller. It watches both contributor kinds, since a cluster
@@ -651,14 +849,25 @@ func (r *TrackerReconciler[T, L]) writeStatus(
 func (r *TrackerReconciler[T, L]) SetupWithManager(mgr ctrl.Manager, forObj client.Object) error {
 	name := fmt.Sprintf("tracker-%T", forObj)
 
-	return ctrl.NewControllerManagedBy(mgr).
+	built, err := ctrl.NewControllerManagedBy(mgr).
 		Named(sanitizeControllerName(name)).
-		For(forObj, builder.WithPredicates(generationOrFinalizerChanged())).
+		// Writes to one target stay serialised regardless: controller-runtime keys its queue by
+		// request, so a given tracker is never reconciled concurrently. This only lets independent
+		// targets progress in parallel, so one slow target does not stall the rest.
+		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: 4}).
+		For(forObj, builder.WithPredicates(trackerChanged())).
 		Watches(&patchv1alpha1.ResourcePatch{},
 			handler.EnqueueRequestsFromMapFunc(r.trackersOfContributor)).
 		Watches(&patchv1alpha1.ClusterResourcePatch{},
 			handler.EnqueueRequestsFromMapFunc(r.trackersOfContributor)).
-		Complete(r)
+		Build(r)
+	if err != nil {
+		return err
+	}
+	// Retained so target watches can be added lazily: target kinds are not known until a
+	// contributor names one.
+	r.ctrl = built
+	return nil
 }
 
 // trackersOfContributor maps a contributor to the trackers it is registered with, filtered to the
@@ -670,8 +879,9 @@ func (r *TrackerReconciler[T, L]) trackersOfContributor(_ context.Context, obj c
 	}
 	wantKind := r.New().TrackerKind()
 
-	var out []reconcile.Request
-	for _, ref := range c.GetPatchStatus().SharedResourceRefs {
+	refs := c.GetPatchStatus().SharedResourceRefs
+	out := make([]reconcile.Request, 0, len(refs))
+	for _, ref := range refs {
 		if ref.Kind != wantKind {
 			continue
 		}

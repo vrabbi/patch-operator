@@ -127,6 +127,9 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 SETUP_ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 
+# The toolchain the module targets, read from go.mod so there is one source of truth.
+GO_TOOLCHAIN ?= go$(shell sed -n 's/^go //p' go.mod)
+
 CONTROLLER_TOOLS_VERSION ?= v0.22.0
 KUSTOMIZE_VERSION ?= v5.7.1
 ENVTEST_VERSION ?= release-0.25
@@ -149,8 +152,22 @@ $(SETUP_ENVTEST): $(LOCALBIN)
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT)
+# Built with the same toolchain the module targets, not via the shared go-install-tool macro.
+#
+# golangci-lint refuses to analyse a module whose go directive is newer than the Go version
+# golangci-lint itself was compiled with, and a prebuilt release binary carries whatever was
+# current when it shipped. Forcing GOTOOLCHAIN here keeps local and CI on the same footing instead
+# of failing in only one of them.
 $(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+	@[ -f "$(GOLANGCI_LINT)-$(GOLANGCI_LINT_VERSION)" ] || { \
+	set -e ;\
+	package=github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) ;\
+	echo "Downloading $${package} with $(GO_TOOLCHAIN)" ;\
+	rm -f $(GOLANGCI_LINT) || true ;\
+	GOTOOLCHAIN=$(GO_TOOLCHAIN) GOBIN=$(LOCALBIN) go install $${package} ;\
+	mv $(GOLANGCI_LINT) $(GOLANGCI_LINT)-$(GOLANGCI_LINT_VERSION) ;\
+	}
+	@ln -sf $(GOLANGCI_LINT)-$(GOLANGCI_LINT_VERSION) $(GOLANGCI_LINT)
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 define go-install-tool

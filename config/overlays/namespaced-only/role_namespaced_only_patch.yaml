@@ -1,0 +1,20 @@
+# Remove the operator's rights over the cluster-scoped kinds it does not serve here.
+#
+# The wildcard grant on target objects stays: the operator still cannot know at install time which
+# namespaced kinds a contributor will name. What changes is that nothing can ask it to write
+# outside a contributor's own namespace.
+- op: replace
+  path: /rules/0/resources
+  value:
+    - resourcepatches
+    - sharedresources
+- op: replace
+  path: /rules/1/resources
+  value:
+    - resourcepatches/status
+    - sharedresources/status
+- op: replace
+  path: /rules/2/resources
+  value:
+    - resourcepatches/finalizers
+    - sharedresources/finalizers

@@ -1,0 +1,48 @@
+# Hand-maintained rather than generated: the validator is one handler serving both contributor
+# kinds via a factory, so controller-gen's per-type webhook markers do not describe it.
+#
+# Registered for CREATE, UPDATE and DELETE deliberately. Checking CREATE alone is trivially
+# bypassed: admit a harmless patch, then update it to point at a different target, or flip
+# onRelease to Delete and delete the object. Both are privilege escalations a create-time check
+# never sees.
+#
+# failurePolicy: Fail is the correct trade for an authorization webhook, and it makes webhook
+# availability a hard dependency -- while it is down, contributors cannot be created and any XR
+# composing one blocks. The Deployment runs two replicas for that reason.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+  labels:
+    app.kubernetes.io/name: patch-operator
+webhooks:
+  - name: vresourcepatch.terasky.com
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: webhook-service
+        namespace: system
+        path: /validate-terasky-com-v1alpha1-resourcepatch
+    rules:
+      - apiGroups: [terasky.com]
+        apiVersions: [v1alpha1]
+        resources: [resourcepatches]
+        operations: [CREATE, UPDATE, DELETE]
+  - name: vclusterresourcepatch.terasky.com
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: webhook-service
+        namespace: system
+        path: /validate-terasky-com-v1alpha1-clusterresourcepatch
+    rules:
+      - apiGroups: [terasky.com]
+        apiVersions: [v1alpha1]
+        resources: [clusterresourcepatches]
+        operations: [CREATE, UPDATE, DELETE]

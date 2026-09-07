@@ -57,10 +57,22 @@ type Manager struct {
 	// slower.
 	Disabled map[schema.GroupVersionKind]bool
 
-	mu      sync.Mutex
-	watched map[schema.GroupVersionKind]bool
+	mu sync.Mutex
+	// watched is keyed by (owner, gvk) rather than by gvk alone.
+	//
+	// This matters because the Manager is shared between the SharedResource and
+	// ClusterSharedResource controllers, and a watch registration belongs to one controller. Keying
+	// on the GVK alone meant whichever controller asked first got the watch and the other silently
+	// got none -- so a promoted target ended up with a tracker that never saw its object change.
+	watched map[watchKey]bool
 	// atCap records that the cap has been reported once, so the log does not repeat per reconcile.
 	atCap bool
+}
+
+// watchKey identifies one controller's watch on one kind.
+type watchKey struct {
+	owner string
+	gvk   schema.GroupVersionKind
 }
 
 // New builds a Manager.
@@ -76,7 +88,7 @@ func New(mgr manager.Manager, maxGVKs int, disabled []schema.GroupVersionKind) *
 		Cluster:  mgr,
 		MaxGVKs:  maxGVKs,
 		Disabled: d,
-		watched:  map[schema.GroupVersionKind]bool{},
+		watched:  map[watchKey]bool{},
 	}
 }
 
@@ -89,8 +101,10 @@ func New(mgr manager.Manager, maxGVKs int, disabled []schema.GroupVersionKind) *
 // controller has started, so a GVK watched for a target that later disappears keeps its informer
 // until the process restarts. The cap is what bounds that, and it is documented rather than
 // papered over.
+// owner distinguishes the calling controller, since each needs its own watch registration.
 func (m *Manager) Ensure(
 	ctx context.Context,
+	owner string,
 	ctrl controller.Controller,
 	gvk schema.GroupVersionKind,
 	mapFn MapFunc,
@@ -106,10 +120,11 @@ func (m *Manager) Ensure(
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.watched[gvk] {
+	key := watchKey{owner: owner, gvk: gvk}
+	if m.watched[key] {
 		return nil
 	}
-	if len(m.watched) >= m.MaxGVKs {
+	if m.distinctGVKsLocked() >= m.MaxGVKs && !m.gvkWatchedLocked(gvk) {
 		if !m.atCap {
 			m.atCap = true
 			logger.Info("watched-GVK cap reached; further target kinds rely on periodic resync",
@@ -126,18 +141,43 @@ func (m *Manager) Ensure(
 		return fmt.Errorf("watching %s: %w", gvk, err)
 	}
 
-	m.watched[gvk] = true
-	logger.Info("watching target kind", "gvk", gvk.String(), "watched", len(m.watched))
+	m.watched[key] = true
+	logger.Info("watching target kind",
+		"gvk", gvk.String(), "owner", owner, "distinctKinds", m.distinctGVKsLocked())
 	return nil
 }
 
-// Watched returns the currently watched GVKs, for metrics and tests.
+// distinctGVKsLocked counts distinct kinds, not registrations. The cap bounds informers, and two
+// controllers watching the same kind share one informer from the manager's cache.
+func (m *Manager) distinctGVKsLocked() int {
+	seen := map[schema.GroupVersionKind]bool{}
+	for k := range m.watched {
+		seen[k.gvk] = true
+	}
+	return len(seen)
+}
+
+func (m *Manager) gvkWatchedLocked(gvk schema.GroupVersionKind) bool {
+	for k := range m.watched {
+		if k.gvk == gvk {
+			return true
+		}
+	}
+	return false
+}
+
+// Watched returns the distinct GVKs currently watched, for metrics and tests.
 func (m *Manager) Watched() []schema.GroupVersionKind {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	seen := map[schema.GroupVersionKind]bool{}
 	out := make([]schema.GroupVersionKind, 0, len(m.watched))
-	for gvk := range m.watched {
-		out = append(out, gvk)
+	for k := range m.watched {
+		if seen[k.gvk] {
+			continue
+		}
+		seen[k.gvk] = true
+		out = append(out, k.gvk)
 	}
 	return out
 }
@@ -146,5 +186,5 @@ func (m *Manager) Watched() []schema.GroupVersionKind {
 func (m *Manager) Count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.watched)
+	return m.distinctGVKsLocked()
 }

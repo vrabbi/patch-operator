@@ -36,6 +36,7 @@ import (
 	patchv1alpha1 "github.com/vrabbi/patch-operator/api/v1alpha1"
 	"github.com/vrabbi/patch-operator/internal/controller"
 	"github.com/vrabbi/patch-operator/internal/impersonate"
+	"github.com/vrabbi/patch-operator/internal/targetcache"
 	patchwebhook "github.com/vrabbi/patch-operator/internal/webhook"
 )
 
@@ -60,20 +61,31 @@ func main() {
 		webhookCertDir       string
 		reauthorizeAfter     time.Duration
 		disableWebhooks      bool
+		maxWatchedGVKs       int
 	)
 
-	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. Use :8443 for HTTPS or :8080 for HTTP, or 0 to disable.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&metricsAddr, "metrics-bind-address", "0",
+		"Address the metrics endpoint binds to. :8443 for HTTPS, :8080 for HTTP, 0 to disable.")
+	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081",
+		"Address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election, ensuring only one active controller manager. Required in HA: two writers on one target is exactly what this operator exists to prevent.")
+		"Enable leader election. Required in HA: two writers on one target is exactly what this "+
+			"operator exists to prevent.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true, "Serve metrics over HTTPS.")
-	flag.BoolVar(&enableHTTP2, "enable-http2", false, "Enable HTTP/2 for the metrics and webhook servers.")
-	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
-	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "Directory holding the webhook serving certificate.")
+	flag.BoolVar(&enableHTTP2, "enable-http2", false,
+		"Enable HTTP/2 for the metrics and webhook servers.")
+	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port the webhook server binds to.")
+	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs",
+		"Directory holding the webhook serving certificate.")
 	flag.DurationVar(&reauthorizeAfter, "reauthorize-after", 10*time.Minute,
-		"How often to re-run the SubjectAccessReview recorded at admission. Admission is point-in-time, so this closes the revoked-RBAC gap. Zero disables the re-check.")
+		"How often to re-run the SubjectAccessReview recorded at admission. Admission is "+
+			"point-in-time, so this closes the revoked-RBAC gap. Zero disables the re-check.")
+	flag.IntVar(&maxWatchedGVKs, "max-watched-target-kinds", targetcache.DefaultMaxGVKs,
+		"Cap on distinct target kinds watched at once. Kinds beyond the cap converge on the "+
+			"requeue interval rather than on events.")
 	flag.BoolVar(&disableWebhooks, "disable-webhooks", false,
-		"Do not register the admission webhooks. For local development only: it removes the SubjectAccessReview boundary.")
+		"Do not register the admission webhooks. Local development only: it removes the "+
+			"SubjectAccessReview boundary.")
 
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
@@ -127,6 +139,8 @@ func main() {
 	}
 	reauthorizer := &patchwebhook.Reauthorizer{Authorizer: authorizer}
 
+	targets := targetcache.New(mgr, maxWatchedGVKs, nil)
+
 	impersonation := impersonate.NewFactory(
 		mgr.GetConfig(),
 		client.Options{Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper()},
@@ -140,6 +154,7 @@ func main() {
 	]{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
+		APIReader:        mgr.GetAPIReader(),
 		New:              func() *patchv1alpha1.ResourcePatch { return &patchv1alpha1.ResourcePatch{} },
 		NewList:          func() *patchv1alpha1.ResourcePatchList { return &patchv1alpha1.ResourcePatchList{} },
 		ReauthorizeAfter: reauthorizeAfter,
@@ -155,6 +170,7 @@ func main() {
 	]{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
+		APIReader:        mgr.GetAPIReader(),
 		New:              func() *patchv1alpha1.ClusterResourcePatch { return &patchv1alpha1.ClusterResourcePatch{} },
 		NewList:          func() *patchv1alpha1.ClusterResourcePatchList { return &patchv1alpha1.ClusterResourcePatchList{} },
 		ReauthorizeAfter: reauthorizeAfter,
@@ -172,6 +188,7 @@ func main() {
 		Scheme:        mgr.GetScheme(),
 		New:           func() *patchv1alpha1.SharedResource { return &patchv1alpha1.SharedResource{} },
 		Impersonation: impersonation,
+		TargetCache:   targets,
 	}
 	if err := sharedResourceReconciler.SetupWithManager(mgr, &patchv1alpha1.SharedResource{}); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "SharedResource")
@@ -185,6 +202,7 @@ func main() {
 		Scheme:        mgr.GetScheme(),
 		New:           func() *patchv1alpha1.ClusterSharedResource { return &patchv1alpha1.ClusterSharedResource{} },
 		Impersonation: impersonation,
+		TargetCache:   targets,
 	}
 	if err := clusterSharedResourceReconciler.SetupWithManager(mgr, &patchv1alpha1.ClusterSharedResource{}); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ClusterSharedResource")

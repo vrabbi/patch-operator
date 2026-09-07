@@ -20,8 +20,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -129,10 +127,4 @@ func sanitizeForName(s string) string {
 		out = out[:len(out)-1]
 	}
 	return string(out)
-}
-
-// projectRoot locates the repository root from this file, for loading CRDs in other suites.
-func projectRoot() string {
-	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(thisFile), "..", "..")
 }

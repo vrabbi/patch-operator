@@ -25,17 +25,34 @@ limitations under the License.
 package v1alpha1
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
 var (
-	// GroupVersion is group version used to register these objects.
+	// GroupVersion is the group version these objects are registered under.
 	GroupVersion = schema.GroupVersion{Group: "terasky.com", Version: "v1alpha1"}
 
-	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
-	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
+	// SchemeBuilder registers the Go types with a scheme.
+	//
+	// Built on runtime.SchemeBuilder rather than controller-runtime's scheme.Builder helper, which
+	// is deprecated precisely because an api package should depend on little more than
+	// apimachinery.
+	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
 
 	// AddToScheme adds the types in this group-version to the given scheme.
 	AddToScheme = SchemeBuilder.AddToScheme
 )
+
+// addKnownTypes registers every kind in this group-version.
+func addKnownTypes(s *runtime.Scheme) error {
+	s.AddKnownTypes(GroupVersion,
+		&ResourcePatch{}, &ResourcePatchList{},
+		&ClusterResourcePatch{}, &ClusterResourcePatchList{},
+		&SharedResource{}, &SharedResourceList{},
+		&ClusterSharedResource{}, &ClusterSharedResourceList{},
+	)
+	metav1.AddToGroupVersion(s, GroupVersion)
+	return nil
+}

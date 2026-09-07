@@ -100,12 +100,14 @@ func (a *ServerSideApplier) patch(
 	manager string,
 	policy patchv1alpha1.ConflictPolicy,
 ) (*Conflict, error) {
-	opts := []client.PatchOption{client.FieldOwner(manager)}
+	// client.Apply is the typed apply path in controller-runtime v0.25; the older
+	// Patch(ctx, obj, client.Apply) form is deprecated.
+	opts := []client.ApplyOption{client.FieldOwner(manager)}
 	if policy == patchv1alpha1.ConflictPolicyForce {
 		opts = append(opts, client.ForceOwnership)
 	}
 
-	err := a.Client.Patch(ctx, obj, client.Apply, opts...)
+	err := a.Client.Apply(ctx, client.ApplyConfigurationFromUnstructured(obj), opts...)
 	if err == nil {
 		return nil, nil
 	}
@@ -127,8 +129,8 @@ func (a *ServerSideApplier) patch(
 		if !c.AllOurs {
 			return c, nil
 		}
-		forced := append(opts, client.ForceOwnership)
-		if err := a.Client.Patch(ctx, obj, client.Apply, forced...); err != nil {
+		forced := append(opts, client.ForceOwnership) //nolint:gocritic // a distinct option set, not an append-to-self
+		if err := a.Client.Apply(ctx, client.ApplyConfigurationFromUnstructured(obj), forced...); err != nil {
 			if IsFieldConflict(err) {
 				return c, nil
 			}
@@ -159,7 +161,8 @@ func (a *ServerSideApplier) Revert(ctx context.Context, req RevertRequest) error
 	obj := &unstructured.Unstructured{}
 	obj.SetUnstructuredContent(render.Identity(req.Target))
 
-	err := a.Client.Patch(ctx, obj, client.Apply, client.FieldOwner(req.FieldManager))
+	err := a.Client.Apply(ctx, client.ApplyConfigurationFromUnstructured(obj),
+		client.FieldOwner(req.FieldManager))
 	if err == nil {
 		return nil
 	}
@@ -171,7 +174,7 @@ func (a *ServerSideApplier) Revert(ctx context.Context, req RevertRequest) error
 	if IsFieldConflict(err) {
 		// Claiming nothing cannot conflict with anyone. If the server says otherwise, forcing is
 		// safe here because the apply asserts no values.
-		return a.Client.Patch(ctx, obj, client.Apply,
+		return a.Client.Apply(ctx, client.ApplyConfigurationFromUnstructured(obj),
 			client.FieldOwner(req.FieldManager), client.ForceOwnership)
 	}
 	return err

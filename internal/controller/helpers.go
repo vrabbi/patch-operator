@@ -123,7 +123,12 @@ func setCond(status *patchv1alpha1.ResourcePatchStatus, condType string, s metav
 }
 
 // setTrackerCond upserts a condition on a tracker status.
-func setTrackerCond(status *patchv1alpha1.SharedResourceStatus, condType string, s metav1.ConditionStatus, reason, msg string) {
+func setTrackerCond(
+	status *patchv1alpha1.SharedResourceStatus,
+	condType string,
+	s metav1.ConditionStatus,
+	reason, msg string,
+) {
 	patchv1alpha1.SetCondition(&status.Conditions, metav1.Condition{
 		Type:    condType,
 		Status:  s,
@@ -156,6 +161,51 @@ func generationOrFinalizerChanged() predicate.Predicate {
 				return true
 			}
 			return len(e.ObjectOld.GetFinalizers()) != len(e.ObjectNew.GetFinalizers())
+		},
+	}
+}
+
+// trackerChanged is the tracker's event filter.
+//
+// Trackers are operator-owned and status-driven, so the plain generation filter is wrong for them:
+// the promotion fence is committed as a *status* update by the contributor controller, and a
+// generation-only predicate would drop it. A fenced tracker that never reconciles never retires,
+// leaving the promotion half-finished.
+//
+// So this passes on a generation change, on any deletion or finalizer change, and on a change to
+// the fields that actually drive a tracker's decisions: the promotion pointer and the contributor
+// count. It deliberately does not pass on every status write, which would loop.
+func trackerChanged() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldT, okOld := e.ObjectOld.(patchv1alpha1.Tracker)
+			newT, okNew := e.ObjectNew.(patchv1alpha1.Tracker)
+			if !okOld || !okNew {
+				return true
+			}
+
+			if oldT.GetGeneration() != newT.GetGeneration() {
+				return true
+			}
+			if !oldT.GetDeletionTimestamp().IsZero() != !newT.GetDeletionTimestamp().IsZero() {
+				return true
+			}
+			if len(oldT.GetFinalizers()) != len(newT.GetFinalizers()) {
+				return true
+			}
+
+			oldS, newS := oldT.GetTrackerStatus(), newT.GetTrackerStatus()
+
+			// The fence appearing, or its adoption being recorded, must wake the controller.
+			if oldS.IsFenced() != newS.IsFenced() {
+				return true
+			}
+			if oldS.PromotedTo != nil && newS.PromotedTo != nil &&
+				oldS.PromotedTo.Adopted != newS.PromotedTo.Adopted {
+				return true
+			}
+
+			return oldS.ContributorCount != newS.ContributorCount
 		},
 	}
 }

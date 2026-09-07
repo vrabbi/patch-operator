@@ -1,0 +1,64 @@
+version: "2"
+
+run:
+  timeout: 10m
+  allow-parallel-runners: true
+
+linters:
+  default: none
+  enable:
+    - copyloopvar
+    - dupl
+    - errcheck
+    - ginkgolinter
+    - goconst
+    - gocyclo
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+
+  settings:
+    dupl:
+      threshold: 200
+    goconst:
+      min-len: 3
+      min-occurrences: 4
+    gocyclo:
+      # The tracker's reconcile is genuinely branchy: it has to handle a missing target, a
+      # conflict, a superseded contributor and a create, each with a different outcome. Splitting
+      # it further would spread one decision across several functions rather than simplify it.
+      min-complexity: 30
+    lll:
+      line-length: 120
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: unused-parameter
+          disabled: true
+
+  exclusions:
+    generated: lax
+    rules:
+      # Generated deepcopy code is not ours to style.
+      - path: zz_generated\..*\.go
+        linters: [lll, dupl, staticcheck, revive]
+      # Tests trade a little duplication for readability: a table-driven rewrite of two similar
+      # scenarios usually makes the assertion harder to follow, not easier.
+      - path: _test\.go
+        linters: [dupl, goconst, lll, gocyclo, unparam]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax

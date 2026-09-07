@@ -19,9 +19,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -53,59 +55,101 @@ import (
 func (r *ContributorReconciler[T, L]) promoteIfNeeded(ctx context.Context, key scope.TargetKey) error {
 	logger := log.FromContext(ctx)
 
-	namespacedName := scope.TrackerName(key)
-	old := &patchv1alpha1.SharedResource{}
-	err := r.Client.Get(ctx, client.ObjectKey{Namespace: key.Namespace, Name: namespacedName}, old)
-	if apierrors.IsNotFound(err) {
-		// Nothing to promote: the cluster tracker will simply be created.
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	clusterName := scope.TrackerName(key)
+	trackerName := scope.TrackerName(key)
+	namespacedKey := client.ObjectKey{Namespace: key.Namespace, Name: trackerName}
 
 	// Step 1: fence, before the successor exists.
-	if old.Status.PromotedTo == nil {
+	//
+	// Read uncached and retry on conflict. A stale read here would write the fence against an old
+	// resourceVersion, the update would fail, and the tracker would be left unfenced while the
+	// successor was being created -- which is precisely the two-writer window the protocol exists
+	// to prevent.
+	fenceErr := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		old := &patchv1alpha1.SharedResource{}
+		if err := r.reader().Get(ctx, namespacedKey, old); err != nil {
+			return err
+		}
+		if old.Status.PromotedTo != nil {
+			return nil
+		}
 		logger.Info("fencing the namespaced tracker before promotion",
-			"tracker", old.Name, "namespace", old.Namespace, "successor", clusterName)
+			"tracker", old.Name, "namespace", old.Namespace, "successor", trackerName)
 
-		old.Status.PromotedTo = &patchv1alpha1.PromotionRef{Name: clusterName}
+		old.Status.PromotedTo = &patchv1alpha1.PromotionRef{Name: trackerName}
 		old.Status.Phase = patchv1alpha1.TrackerPhasePromoting
 		setTrackerCond(&old.Status, patchv1alpha1.ConditionSynced, metav1.ConditionFalse,
 			patchv1alpha1.ReasonPromoting,
 			"a ClusterResourcePatch joined this target; migrating to a ClusterSharedResource")
 
-		if err := r.Client.Status().Update(ctx, old); err != nil {
-			return fmt.Errorf("fencing tracker %s/%s: %w", old.Namespace, old.Name, err)
-		}
+		return r.Client.Status().Update(ctx, old)
+	})
+	if apierrors.IsNotFound(fenceErr) {
+		// Nothing to promote: no namespaced tracker owns this target, so the cluster tracker is
+		// simply created by the normal path.
+		return nil
+	}
+	if fenceErr != nil {
+		return fmt.Errorf("fencing tracker %s: %w", namespacedKey, fenceErr)
 	}
 
-	// Step 2: create the successor, carrying the state forward.
-	if err := r.createSuccessor(ctx, old, clusterName, key); err != nil {
+	// Step 2: ensure the successor exists and has adopted the state.
+	old := &patchv1alpha1.SharedResource{}
+	if err := r.reader().Get(ctx, namespacedKey, old); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if err := r.createSuccessor(ctx, old, trackerName, key); err != nil {
 		return err
 	}
 
-	// Step 3: record adoption.
-	if !old.Status.PromotedTo.Adopted {
-		old.Status.PromotedTo.Adopted = true
-		if err := r.Client.Status().Update(ctx, old); err != nil {
-			return fmt.Errorf("marking promotion adopted for %s/%s: %w", old.Namespace, old.Name, err)
+	// Step 3: record adoption, again against a fresh read.
+	//
+	// This flag is what lets the fenced tracker retire. Until it is set, the tracker keeps its
+	// finalizer, so a crash anywhere above leaves the state recoverable rather than lost.
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &patchv1alpha1.SharedResource{}
+		if err := r.reader().Get(ctx, namespacedKey, current); err != nil {
+			return client.IgnoreNotFound(err)
 		}
-	}
-
-	// Step 4 happens in the tracker controller's finishPromotion, so the tracker that holds the
-	// finalizer is the one that releases it.
-	return nil
+		if current.Status.PromotedTo == nil {
+			// Unfenced underneath us; the next pass re-fences.
+			return nil
+		}
+		if current.Status.PromotedTo.Adopted {
+			return nil
+		}
+		current.Status.PromotedTo.Adopted = true
+		return r.Client.Status().Update(ctx, current)
+	})
 }
 
-// createSuccessor creates the ClusterSharedResource, copying the namespaced tracker's state.
+// reader returns the uncached reader when one is configured, falling back to the cached client.
+//
+// The fallback keeps the reconciler usable in tests that construct it without a manager; in the
+// operator, main.go always supplies mgr.GetAPIReader().
+func (r *ContributorReconciler[T, L]) reader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+// createSuccessor ensures the ClusterSharedResource exists and has adopted the namespaced
+// tracker's state.
+//
+// It must be idempotent for a reason that is easy to miss: the arriving ClusterResourcePatch's
+// normal path also creates the cluster tracker, so the successor may already exist by the time
+// this runs. An early return on "it exists" would leave the successor with an empty status --
+// which the tracker controller would then partly repopulate from a live list, hiding the loss of
+// exactly the state that cannot be re-derived.
+//
+// So adoption is keyed off the fence's Adopted flag, not off the successor's existence, and the
+// copy MERGES rather than overwrites: the successor may already have computed its own contributor
+// list, and clobbering it would be a regression.
 //
 // Two parts of the copy are load-bearing rather than incidental:
 //
-//   - priorValues: losing them breaks revert for every existing contributor under ClientSideApply.
-//     Fields would be deleted on release instead of restored to what they held before.
+//   - priorValues (per contributor): losing them breaks revert under ClientSideApply. Fields would
+//     be deleted on release instead of restored to what they held before.
 //   - createdByOperator and creatorPatchRef: losing them breaks the delete-safety rule. The
 //     successor would no longer know it created the object or which contributor created it, and
 //     "only the creator may delete" would evaporate at exactly the moment the contributor set
@@ -116,59 +160,118 @@ func (r *ContributorReconciler[T, L]) createSuccessor(
 	clusterName string,
 	key scope.TargetKey,
 ) error {
-	successor := &patchv1alpha1.ClusterSharedResource{}
-	err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName}, successor)
-	if err == nil {
-		// Already created, by us on a previous pass or by a concurrent reconcile. Idempotent.
+	if old.Status.PromotedTo != nil && old.Status.PromotedTo.Adopted {
 		return nil
 	}
-	if !apierrors.IsNotFound(err) {
+
+	successor := &patchv1alpha1.ClusterSharedResource{}
+	err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName}, successor)
+
+	switch {
+	case apierrors.IsNotFound(err):
+		successor = &patchv1alpha1.ClusterSharedResource{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterName},
+			Spec: patchv1alpha1.SharedResourceSpec{
+				TargetRef: patchv1alpha1.TrackerTargetRef{
+					APIVersion: key.APIVersion,
+					Kind:       key.Kind,
+					Name:       key.Name,
+					// Explicit here: the successor is cluster-scoped, so it can no longer infer
+					// the target's namespace from its own.
+					Namespace: key.Namespace,
+				},
+			},
+		}
+		controllerutil.AddFinalizer(successor, patchv1alpha1.TrackerFinalizer)
+		if err := r.Client.Create(ctx, successor); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("creating successor %s: %w", clusterName, err)
+		}
+	case err != nil && !apierrors.IsNotFound(err):
 		return err
 	}
 
-	successor = &patchv1alpha1.ClusterSharedResource{
-		ObjectMeta: metav1.ObjectMeta{Name: clusterName},
-		Spec: patchv1alpha1.SharedResourceSpec{
-			TargetRef: patchv1alpha1.TrackerTargetRef{
-				APIVersion: key.APIVersion,
-				Kind:       key.Kind,
-				Name:       key.Name,
-				// The namespace must be explicit here: the successor is cluster-scoped, so it can
-				// no longer infer the target's namespace from its own.
-				Namespace: key.Namespace,
-			},
-		},
-	}
-	controllerutil.AddFinalizer(successor, patchv1alpha1.TrackerFinalizer)
-
-	if err := r.Client.Create(ctx, successor); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return nil
+	// Copy the state, re-reading uncached on each attempt. The cached read would not yet see an
+	// object created moments ago, and the successor's own controller is writing its status
+	// concurrently, so both a NotFound and a conflict are expected here rather than exceptional.
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &patchv1alpha1.ClusterSharedResource{}
+		if err := r.reader().Get(ctx, client.ObjectKey{Name: clusterName}, current); err != nil {
+			return err
 		}
-		return fmt.Errorf("creating successor %s: %w", clusterName, err)
+
+		adoptStatus(&current.Status, &old.Status, old.Namespace, old.Name)
+
+		if err := r.Client.Status().Update(ctx, current); err != nil {
+			return err
+		}
+
+		log.FromContext(ctx).Info("promotion: successor adopted the tracker's state",
+			"successor", clusterName,
+			"contributors", len(current.Status.Contributors),
+			"createdByOperator", current.Status.CreatedByOperator,
+			"creatorRecorded", current.Status.CreatorPatchRef != nil)
+		return nil
+	})
+}
+
+// adoptStatus merges the state a successor cannot re-derive from the tracker it replaces.
+//
+// Fields the successor can work out for itself -- the contributor list, phase, conditions -- are
+// left alone if already set. Fields that only the predecessor knows are carried over.
+func adoptStatus(dst, src *patchv1alpha1.SharedResourceStatus, srcNamespace, srcName string) {
+	// Provenance: only the predecessor knows whether the operator created this target and which
+	// contributor did it.
+	if !dst.CreatedByOperator && src.CreatedByOperator {
+		dst.CreatedByOperator = true
+	}
+	if dst.CreatorPatchRef == nil && src.CreatorPatchRef != nil {
+		dst.CreatorPatchRef = src.CreatorPatchRef.DeepCopy()
+	}
+	if dst.ObservedBaseHash == "" {
+		dst.ObservedBaseHash = src.ObservedBaseHash
+	}
+	if dst.ObservedTargetUID == "" {
+		dst.ObservedTargetUID = src.ObservedTargetUID
+	}
+	if dst.ObservedResourceVersion == "" {
+		dst.ObservedResourceVersion = src.ObservedResourceVersion
 	}
 
-	// The status has to be written after the create, since Create does not persist a status
-	// subresource.
-	successor.Status = *old.Status.DeepCopy()
-	// The successor is not itself fenced: promotion is one-way and a ClusterSharedResource is
+	// Per-contributor bookkeeping. A contributor the successor already knows about keeps its own
+	// record, but any revert state it is missing is filled in from the predecessor -- that state
+	// cannot be recomputed, because re-deriving priorValues would capture the contributor's own
+	// value and make revert a no-op.
+	for _, srcRec := range src.Contributors {
+		existing := dst.FindContributor(srcRec.PatchRef)
+		if existing == nil {
+			dst.Contributors = append(dst.Contributors, *srcRec.DeepCopy())
+			continue
+		}
+		if existing.PriorValues == nil && srcRec.PriorValues != nil {
+			existing.PriorValues = srcRec.PriorValues.DeepCopy()
+		}
+		if len(existing.OwnedPaths) == 0 {
+			existing.OwnedPaths = append([]string(nil), srcRec.OwnedPaths...)
+		}
+		if existing.LastAppliedHash == "" {
+			existing.LastAppliedHash = srcRec.LastAppliedHash
+		}
+		if existing.FieldManager == "" {
+			existing.FieldManager = srcRec.FieldManager
+		}
+	}
+	dst.ContributorCount = int32(len(dst.Contributors))
+
+	// The successor is never itself fenced: promotion is one-way and a ClusterSharedResource is
 	// never demoted.
-	successor.Status.PromotedTo = nil
-	successor.Status.Phase = patchv1alpha1.TrackerPhaseApplied
-	setTrackerCond(&successor.Status, patchv1alpha1.ConditionSynced, metav1.ConditionTrue,
+	dst.PromotedTo = nil
+	if dst.Phase == "" || dst.Phase == patchv1alpha1.TrackerPhasePromoting {
+		dst.Phase = patchv1alpha1.TrackerPhaseApplied
+	}
+	setTrackerCond(dst, patchv1alpha1.ConditionSynced, metav1.ConditionTrue,
 		"AdoptedFromPromotion",
 		fmt.Sprintf("adopted %d contributor(s) from SharedResource %s/%s",
-			len(successor.Status.Contributors), old.Namespace, old.Name))
-
-	if err := r.Client.Status().Update(ctx, successor); err != nil {
-		return fmt.Errorf("copying state to successor %s: %w", clusterName, err)
-	}
-
-	log.FromContext(ctx).Info("promotion: successor adopted the tracker's state",
-		"successor", clusterName,
-		"contributors", len(successor.Status.Contributors),
-		"createdByOperator", successor.Status.CreatedByOperator)
-	return nil
+			len(dst.Contributors), srcNamespace, srcName))
 }
 
 // finishPromotion tears down a fenced tracker once its successor has adopted the state.
@@ -200,14 +303,15 @@ func (r *TrackerReconciler[T, L]) finishPromotion(ctx context.Context, tracker T
 		return ctrl.Result{}, err
 	}
 
-	// The successor exists. Do not release the finalizer until it actually holds the state, or a
-	// crash here would lose the contributor list along with its revert bookkeeping.
-	if len(successor.Status.Contributors) < len(status.Contributors) {
-		logger.V(1).Info("waiting for the successor to finish adopting state",
-			"successor", successor.Name,
-			"adopted", len(successor.Status.Contributors),
-			"expected", len(status.Contributors))
-		return ctrl.Result{Requeue: true}, nil
+	// The successor exists. Do not release the finalizer until adoption is actually flagged: a
+	// crash here would otherwise lose the provenance and revert bookkeeping that only this tracker
+	// holds. The flag is set by createSuccessor after the copy lands, so it is the honest signal --
+	// comparing contributor counts would pass as soon as the successor recomputed its own list,
+	// which it can do without ever having adopted anything.
+	if !status.PromotedTo.Adopted {
+		logger.V(1).Info("waiting for the successor to flag adoption",
+			"successor", successor.Name, "contributors", len(successor.Status.Contributors))
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	logger.Info("promotion complete; retiring the namespaced tracker",

@@ -45,11 +45,11 @@ func configMap(ns, name string, data map[string]any) *unstructured.Unstructured 
 
 func ssaApply(ctx context.Context, t *testing.T, obj *unstructured.Unstructured, manager string, force bool) error {
 	t.Helper()
-	opts := []client.PatchOption{client.FieldOwner(manager)}
+	opts := []client.ApplyOption{client.FieldOwner(manager)}
 	if force {
 		opts = append(opts, client.ForceOwnership)
 	}
-	return k8sClient.Patch(ctx, obj, client.Apply, opts...)
+	return k8sClient.Apply(ctx, client.ApplyConfigurationFromUnstructured(obj), opts...)
 }
 
 func getConfigMap(ctx context.Context, t *testing.T, ns, name string) *unstructured.Unstructured {
@@ -71,8 +71,9 @@ func dataOf(t *testing.T, obj *unstructured.Unstructured) map[string]string {
 }
 
 func managers(obj *unstructured.Unstructured) []string {
-	var out []string
-	for _, e := range obj.GetManagedFields() {
+	fields := obj.GetManagedFields()
+	out := make([]string, 0, len(fields))
+	for _, e := range fields {
 		out = append(out, e.Manager)
 	}
 	return out

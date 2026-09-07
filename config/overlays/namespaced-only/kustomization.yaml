@@ -1,0 +1,60 @@
+# Namespace-only install.
+#
+# Omits the cluster-scoped CRDs entirely, so cross-namespace contribution is not merely denied but
+# absent -- there is no API to express it. The operator then needs no cluster-wide write RBAC, and
+# the strongest control in the design (a ResourcePatch cannot reach outside its namespace) holds by
+# construction rather than by policy.
+#
+# Use this when no shared object is ever contributed to from outside its own namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: patch-operator-system
+namePrefix: patch-operator-
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/name: patch-operator
+resources:
+  - ../../rbac
+  - ../../manager
+  - ../../webhook
+  - ../../default/cert.yaml
+  - crd
+patches:
+  - path: ../../default/webhook_cainjection_patch.yaml
+    target:
+      kind: ValidatingWebhookConfiguration
+  # Drop the ClusterResourcePatch webhook: the kind does not exist in this install.
+  - path: webhook_namespaced_only_patch.yaml
+    target:
+      kind: ValidatingWebhookConfiguration
+  # Narrow the operator's own RBAC to match.
+  - path: role_namespaced_only_patch.yaml
+    target:
+      kind: ClusterRole
+      name: manager-role
+replacements:
+  - source:
+      kind: Certificate
+      group: cert-manager.io
+      version: v1
+      name: serving-cert
+      fieldPath: .metadata.namespace
+    targets:
+      - select:
+          kind: ValidatingWebhookConfiguration
+        fieldPaths:
+          - .metadata.annotations.[cert-manager.io/inject-ca-from]
+        options: { delimiter: /, index: 0, create: true }
+  - source:
+      kind: Certificate
+      group: cert-manager.io
+      version: v1
+      name: serving-cert
+      fieldPath: .metadata.name
+    targets:
+      - select:
+          kind: ValidatingWebhookConfiguration
+        fieldPaths:
+          - .metadata.annotations.[cert-manager.io/inject-ca-from]
+        options: { delimiter: /, index: 1, create: true }

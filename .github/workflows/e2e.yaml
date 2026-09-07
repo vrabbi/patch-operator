@@ -1,0 +1,64 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Kind e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: patch-operator-e2e
+          node_image: kindest/node:v1.34.0
+
+      - name: Install cert-manager
+        run: |
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.1/cert-manager.yaml
+          kubectl -n cert-manager rollout status deploy/cert-manager --timeout=5m
+          kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=5m
+
+      - name: Build and load the operator image
+        run: |
+          make docker-build IMG=patch-operator:e2e
+          kind load docker-image patch-operator:e2e --name patch-operator-e2e
+
+      - name: Deploy
+        run: |
+          make deploy IMG=patch-operator:e2e
+          kubectl -n patch-operator-system rollout status deploy/patch-operator-controller-manager --timeout=5m
+
+      - name: Run e2e tests
+        run: make test-e2e
+
+      # The operator's own logs are the only way to tell a test bug from an operator bug after the
+      # fact, so they are always collected.
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          echo "=== operator logs ==="
+          kubectl -n patch-operator-system logs -l control-plane=controller-manager --tail=500 --all-containers || true
+          echo "=== contributors ==="
+          kubectl get resourcepatches,clusterresourcepatches -A -o yaml || true
+          echo "=== trackers ==="
+          kubectl get sharedresources,clustersharedresources -A -o yaml || true
+          echo "=== events ==="
+          kubectl get events -A --sort-by=.lastTimestamp | tail -50 || true

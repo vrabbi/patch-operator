@@ -84,10 +84,3 @@ type ClusterResourcePatchList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ClusterResourcePatch `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(
-		&ResourcePatch{}, &ResourcePatchList{},
-		&ClusterResourcePatch{}, &ClusterResourcePatchList{},
-	)
-}

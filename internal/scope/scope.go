@@ -72,7 +72,10 @@ func (k TargetKey) IsClusterScopedTarget() bool { return k.Namespace == "" }
 //
 // isNamespacedKind reports whether the target's kind is namespaced; a nil func skips that check,
 // which is what admission does when a RESTMapper lookup is unavailable.
-func Validate(c patchv1alpha1.Contributor, isNamespacedKind func(apiVersion, kind string) (bool, error)) field.ErrorList {
+func Validate(
+	c patchv1alpha1.Contributor,
+	isNamespacedKind func(apiVersion, kind string) (bool, error),
+) field.ErrorList {
 	var errs field.ErrorList
 	spec := c.GetPatchSpec()
 	specPath := field.NewPath("spec")
@@ -179,7 +182,8 @@ func validateLifecycle(spec *patchv1alpha1.ResourcePatchSpec, p *field.Path) fie
 	if spec.Lifecycle.OnRelease == patchv1alpha1.OnReleaseDelete &&
 		spec.Lifecycle.OnMissing != patchv1alpha1.OnMissingCreate {
 		errs = append(errs, field.Forbidden(lp.Child("onRelease"),
-			"onRelease: Delete requires onMissing: Create; only the contributor that created a target may delete it"))
+			"onRelease: Delete requires onMissing: Create; only the contributor that created a "+
+				"target may delete it"))
 	}
 
 	if spec.Lifecycle.OnMissing == patchv1alpha1.OnMissingCreate && spec.Base == nil {
@@ -189,7 +193,8 @@ func validateLifecycle(spec *patchv1alpha1.ResourcePatchSpec, p *field.Path) fie
 
 	if spec.Lifecycle.BaseReconcile == patchv1alpha1.BaseReconcileEnforce {
 		errs = append(errs, field.Forbidden(lp.Child("baseReconcile"),
-			"baseReconcile: Enforce is not implemented in v1alpha1; it needs its own priority semantics against contributions"))
+			"baseReconcile: Enforce is not implemented in v1alpha1; it needs its own priority "+
+				"semantics against contributions"))
 	}
 	return errs
 }
@@ -234,7 +239,8 @@ func validatePatch(spec *patchv1alpha1.ResourcePatchSpec, p *field.Path) field.E
 	// semantics from the schema. Accepting them silently would imply they take effect.
 	if len(spec.Patch.MergeKeys) > 0 && spec.Apply.Mode == patchv1alpha1.ApplyModeServerSideApply {
 		errs = append(errs, field.Forbidden(pp.Child("mergeKeys"),
-			"mergeKeys only apply under apply.mode: ClientSideApply; server-side apply takes list semantics from the target's schema"))
+			"mergeKeys only apply under apply.mode: ClientSideApply; server-side apply takes "+
+				"list semantics from the target's schema"))
 	}
 	for i, mk := range spec.Patch.MergeKeys {
 		if mk.Path == "" {
@@ -261,7 +267,8 @@ func validateNamespaced(
 	// The target namespace may be omitted, but never point elsewhere.
 	if spec.Target.Namespace != "" && spec.Target.Namespace != own {
 		errs = append(errs, field.Invalid(targetPath.Child("namespace"), spec.Target.Namespace,
-			fmt.Sprintf("a ResourcePatch may only target its own namespace (%q); use a ClusterResourcePatch to cross a namespace boundary", own)))
+			fmt.Sprintf("a ResourcePatch may only target its own namespace (%q); "+
+				"use a ClusterResourcePatch to cross a namespace boundary", own)))
 	}
 
 	// A cluster-scoped target has no namespace to be contained by.

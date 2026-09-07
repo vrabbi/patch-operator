@@ -52,6 +52,15 @@ type ContributorReconciler[T patchv1alpha1.Contributor, L client.ObjectList] str
 	Client client.Client
 	Scheme *runtimeScheme
 
+	// APIReader reads straight from the API server, bypassing the informer cache.
+	//
+	// Promotion needs this. The cache is eventually consistent, and promotion reads a tracker it
+	// is about to mutate -- and re-reads a successor it just created. A cached read there returns
+	// a stale object or a NotFound for something that demonstrably exists, so the fence gets
+	// written against a stale resourceVersion and lost. Correctness of the fence is the whole
+	// safety argument for promotion, so it does not get to depend on cache timing.
+	APIReader client.Reader
+
 	// New returns a fresh empty object of the reconciled kind.
 	New func() T
 	// NewList returns a fresh empty list of the reconciled kind.
@@ -312,6 +321,32 @@ func (r *ContributorReconciler[T, L]) ensureTracker(
 		}
 	}
 
+	clusterRef := patchv1alpha1.TrackerRef{
+		Kind: patchv1alpha1.KindClusterSharedResource,
+		Name: scope.TrackerName(key),
+	}
+
+	// A namespaced contributor must join an existing ClusterSharedResource rather than stand up a
+	// namespaced tracker beside it.
+	//
+	// This is rule 3 of DESIGN.md 3.5 seen from the namespaced side: once any cluster-scoped
+	// contributor exists, the cluster tracker owns the target for everyone. Skipping this check
+	// would let a namespaced contributor recreate a retired namespaced tracker the moment
+	// promotion deleted it, resurrecting the second writer the promotion existed to remove.
+	//
+	// Read uncached: a cached miss here is indistinguishable from "no cluster tracker exists", and
+	// guessing wrong recreates the writer.
+	if !obj.IsClusterScoped() && !key.IsClusterScopedTarget() {
+		existing := &patchv1alpha1.ClusterSharedResource{}
+		err := r.reader().Get(ctx, client.ObjectKey{Name: clusterRef.Name}, existing)
+		switch {
+		case err == nil:
+			return clusterRef, nil
+		case !apierrors.IsNotFound(err):
+			return patchv1alpha1.TrackerRef{}, err
+		}
+	}
+
 	kind := scope.TrackerKindFor(key, obj.IsClusterScoped())
 	name := scope.TrackerName(key)
 	namespace := scope.TrackerNamespace(kind, key)
@@ -528,8 +563,9 @@ func (r *ContributorReconciler[T, L]) contributorsOfTracker(_ context.Context, o
 	}
 	wantKind := r.New().ContributorKind()
 
-	var out []reconcile.Request
-	for _, c := range tracker.GetTrackerStatus().Contributors {
+	contributors := tracker.GetTrackerStatus().Contributors
+	out := make([]reconcile.Request, 0, len(contributors))
+	for _, c := range contributors {
 		if c.PatchRef.Kind != wantKind {
 			continue
 		}
