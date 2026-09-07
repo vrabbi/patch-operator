@@ -60,9 +60,9 @@ type Tracker interface {
 
 // Kind names, used where a string is recorded in status rather than a typed reference.
 const (
-	KindResourcePatch        = "ResourcePatch"
-	KindClusterResourcePatch = "ClusterResourcePatch"
-	KindSharedResource       = "SharedResource"
+	KindResourcePatch         = "ResourcePatch"
+	KindClusterResourcePatch  = "ClusterResourcePatch"
+	KindSharedResource        = "SharedResource"
 	KindClusterSharedResource = "ClusterSharedResource"
 )
 
