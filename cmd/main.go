@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -43,6 +44,11 @@ import (
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
+
+	// version is stamped at build time by the release workflow, via the Dockerfile's VERSION
+	// build arg. A locally built binary reports "dev", which is the honest answer: an operator
+	// that cannot say which build is running turns every field report into a guess.
+	version = "dev"
 )
 
 func init() {
@@ -62,6 +68,7 @@ func main() {
 		reauthorizeAfter     time.Duration
 		disableWebhooks      bool
 		maxWatchedGVKs       int
+		showVersion          bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0",
@@ -87,11 +94,19 @@ func main() {
 		"Do not register the admission webhooks. Local development only: it removes the "+
 			"SubjectAccessReview boundary.")
 
+	flag.BoolVar(&showVersion, "version", false, "Print the version and exit.")
+
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	if showVersion {
+		fmt.Println(version)
+		return
+	}
+
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	setupLog.Info("starting patch-operator", "version", version)
 
 	// HTTP/2 is off by default: it has a history of denial-of-service issues (CVE-2023-44487 and
 	// CVE-2023-39325), and neither the metrics endpoint nor the webhook needs it.

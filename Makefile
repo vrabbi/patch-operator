@@ -113,6 +113,17 @@ deploy-namespaced-only: manifests kustomize ## Deploy without the cluster-scoped
 # which kustomize permits only with this flag.
 NAMESPACED_ONLY_FLAGS ?= --load-restrictor LoadRestrictionsNone
 
+.PHONY: build-installer
+build-installer: manifests generate kustomize ## Render both overlays into single-file installers under dist/.
+	@mkdir -p dist
+	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	$(KUSTOMIZE) build config/default > dist/install.yaml
+	$(KUSTOMIZE) build $(NAMESPACED_ONLY_FLAGS) config/overlays/namespaced-only \
+		> dist/install-namespaced-only.yaml
+	@# The image edit above rewrites a tracked file. Releases pass a digest, which must not be
+	@# committed, so put it back the way it was.
+	git checkout -- config/manager/kustomization.yaml
+
 ##@ Docs
 
 .PHONY: docs-serve

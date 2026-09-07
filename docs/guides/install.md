@@ -18,11 +18,12 @@ Installs all four CRDs, the operator, and the admission webhooks -- a
 [Security](../security.md#re-checking-after-admission) for why that has to be a second webhook).
 
 ```bash
-git clone https://github.com/vrabbi/patch-operator
-cd patch-operator
-make deploy IMG=ghcr.io/vrabbi/patch-operator:latest
+kubectl apply -f https://github.com/vrabbi/patch-operator/releases/latest/download/install.yaml
 kubectl -n patch-operator-system rollout status deploy/patch-operator-controller-manager
 ```
+
+The released manifest pins the image **by digest**, so it keeps deploying the bytes that release
+tested and signed even if a tag is later moved.
 
 ## Namespace-only install
 
@@ -32,12 +33,50 @@ It omits the cluster-scoped CRDs entirely, so cross-namespace contribution is no
 **absent** — there is no API to express it — and the operator needs no cluster-wide write RBAC.
 
 ```bash
-make deploy-namespaced-only IMG=ghcr.io/vrabbi/patch-operator:latest
+kubectl apply -f https://github.com/vrabbi/patch-operator/releases/latest/download/install-namespaced-only.yaml
 ```
 
 You get `ResourcePatch` and `SharedResource` only. The strongest control in the design — that a
 `ResourcePatch` cannot reach outside its namespace — then holds by construction rather than by
 policy. See [Security](../security.md).
+
+## Install from a checkout
+
+To deploy a build of your own, or to change the kustomize overlay before applying it:
+
+```bash
+git clone https://github.com/vrabbi/patch-operator
+cd patch-operator
+make deploy IMG=ghcr.io/vrabbi/patch-operator:latest              # or deploy-namespaced-only
+```
+
+`make build-installer IMG=...` renders both overlays into `dist/` without applying them, which is
+what the release workflow does.
+
+## Verifying a release
+
+Every release image is signed keylessly with [cosign](https://github.com/sigstore/cosign) using the
+release workflow's GitHub OIDC identity, and carries build-provenance and SBOM attestations. There
+is no long-lived signing key to trust or rotate — verification checks *which workflow in which
+repository* produced the artifact.
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/vrabbi/patch-operator/\.github/workflows/release\.yml@refs/tags/.*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/vrabbi/patch-operator@sha256:<digest>
+
+gh attestation verify oci://ghcr.io/vrabbi/patch-operator@sha256:<digest> --repo vrabbi/patch-operator
+```
+
+The install manifests are covered by a cosign-signed `checksums.txt` on the same release. Each
+release body carries the digest and the exact commands.
+
+A running operator reports its build:
+
+```bash
+kubectl -n patch-operator-system logs deploy/patch-operator-controller-manager | head -1
+```
 
 ## Granting access
 

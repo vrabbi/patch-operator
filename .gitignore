@@ -5,3 +5,6 @@ site/
 __pycache__/
 *.test
 .cache/
+
+# Rendered install manifests, produced by `make build-installer`.
+dist/
