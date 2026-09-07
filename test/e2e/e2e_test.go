@@ -164,6 +164,87 @@ func configMapData(ns, name string) map[string]string {
 	return cm.Data
 }
 
+// getJSON reads an object as JSON and decodes it into out.
+func getJSON(kind, ns, name string, out any) error {
+	args := []string{"get", kind, name, "-o", "json"}
+	if ns != "" {
+		args = append(args, "-n", ns)
+	}
+	raw, err := kubectl(args...)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(raw), out)
+}
+
+// annotations returns an object's annotations.
+func annotations(kind, ns, name string) map[string]string {
+	var obj struct {
+		Metadata struct {
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+	}
+	if err := getJSON(kind, ns, name, &obj); err != nil {
+		return nil
+	}
+	return obj.Metadata.Annotations
+}
+
+// conditionStatus returns the status of one condition on a contributor.
+//
+// Read from JSON rather than a kubectl jsonpath filter: a filter expression with quoted strings is
+// awkward to get right through exec, and a quoting bug there is indistinguishable from a real
+// product failure.
+func conditionStatus(kind, ns, name, condType string) string {
+	var obj struct {
+		Status struct {
+			Conditions []struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
+			} `json:"conditions"`
+		} `json:"status"`
+	}
+	if err := getJSON(kind, ns, name, &obj); err != nil {
+		return ""
+	}
+	for _, c := range obj.Status.Conditions {
+		if c.Type == condType {
+			return c.Status
+		}
+	}
+	return ""
+}
+
+// clusterTrackersForNamespace returns the ClusterSharedResources whose target is in ns.
+func clusterTrackersForNamespace(ns string) []string {
+	out, err := kubectl("get", "clustersharedresources", "-o", "json")
+	if err != nil {
+		return nil
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				TargetRef struct {
+					Namespace string `json:"namespace"`
+				} `json:"targetRef"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return nil
+	}
+	var names []string
+	for _, item := range list.Items {
+		if item.Spec.TargetRef.Namespace == ns {
+			names = append(names, item.Metadata.Name)
+		}
+	}
+	return names
+}
+
 func objectExists(kind, ns, name string) bool {
 	args := []string{"get", kind, name, "-o", "name"}
 	if ns != "" {
@@ -174,26 +255,25 @@ func objectExists(kind, ns, name string) bool {
 }
 
 func ingressHosts(ns, name string) map[string]bool {
-	out, err := kubectl("get", "ingress", name, "-n", ns,
-		"-o", `jsonpath={.spec.rules[*].host}`)
-	if err != nil || out == "" {
-		return map[string]bool{}
+	var obj struct {
+		Spec struct {
+			Rules []struct {
+				Host string `json:"host"`
+			} `json:"rules"`
+		} `json:"spec"`
 	}
 	hosts := map[string]bool{}
-	for _, h := range strings.Fields(out) {
-		hosts[h] = true
+	if err := getJSON("ingress", ns, name, &obj); err != nil {
+		return hosts
+	}
+	for _, r := range obj.Spec.Rules {
+		hosts[r.Host] = true
 	}
 	return hosts
 }
 
 func contributorReady(kind, ns, name string) bool {
-	args := []string{"get", kind, name, "-o",
-		`jsonpath={.status.conditions[?(@.type=="Ready")].status}`}
-	if ns != "" {
-		args = append(args, "-n", ns)
-	}
-	out, err := kubectl(args...)
-	return err == nil && out == "True"
+	return conditionStatus(kind, ns, name, "Ready") == "True"
 }
 
 // --- manifests ---
@@ -422,9 +502,7 @@ spec:
 		return err == nil && out == ""
 	})
 	waitFor(t, "a ClusterSharedResource to own the target", func() bool {
-		out, err := kubectl("get", "clustersharedresources", "-o",
-			`jsonpath={range .items[?(@.spec.targetRef.namespace=="`+ns+`")]}{.metadata.name}{end}`)
-		return err == nil && out != ""
+		return len(clusterTrackersForNamespace(ns)) == 1
 	})
 
 	// The existing contribution survived the migration untouched.
@@ -512,9 +590,7 @@ func TestAdmissionRecordsAuthorizedPrincipal(t *testing.T) {
 
 	apply(t, cmContributor(ns, "recorded", "shared", "k", "v", true))
 	waitFor(t, "the authorized-as annotation to be recorded", func() bool {
-		out, err := kubectl("get", "resourcepatch", "recorded", "-n", ns, "-o",
-			`jsonpath={.metadata.annotations.terasky\.com/authorized-as}`)
-		return err == nil && out != ""
+		return annotations("resourcepatch", ns, "recorded")["terasky.com/authorized-as"] != ""
 	})
 }
 
