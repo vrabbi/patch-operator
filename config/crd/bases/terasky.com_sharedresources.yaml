@@ -1,0 +1,328 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: sharedresources.terasky.com
+spec:
+  group: terasky.com
+  names:
+    kind: SharedResource
+    listKind: SharedResourceList
+    plural: sharedresources
+    shortNames:
+    - sr
+    singular: sharedresource
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.targetRef.kind
+      name: Target
+      type: string
+    - jsonPath: .spec.targetRef.name
+      name: Name
+      type: string
+    - jsonPath: .status.contributorCount
+      name: Contributors
+      type: integer
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SharedResource tracks one namespaced target whose contributors all live in this namespace.
+
+          Operator-owned: users do not create these. It is the only writer to its target, which is what
+          makes writes serialised, apply order deterministic, and the reference count evaluable at a
+          single point.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SharedResourceSpec identifies the target a tracker owns.
+            properties:
+              targetRef:
+                description: TargetRef identifies the target object.
+                properties:
+                  apiVersion:
+                    type: string
+                  kind:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is empty for a cluster-scoped target. On a namespaced SharedResource it is
+                      implicit in the tracker's own namespace but recorded here too, so the reference is complete
+                      when copied to a ClusterSharedResource during promotion.
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
+            required:
+            - targetRef
+            type: object
+          status:
+            description: SharedResourceStatus is the status shared by SharedResource
+              and ClusterSharedResource.
+            properties:
+              conditions:
+                description: Conditions follow the same shape as contributors'.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              conflicts:
+                description: Conflicts records unresolved field-path conflicts.
+                items:
+                  description: ConflictStatus records one field-path conflict and
+                    who is party to it.
+                  properties:
+                    claimants:
+                      description: |-
+                        Claimants are the contributors claiming it, qualified by kind since a namespaced and a
+                        cluster-scoped contributor can be party to the same conflict after a promotion.
+                      items:
+                        type: string
+                      type: array
+                    fieldPath:
+                      description: FieldPath is the contested path.
+                      type: string
+                    holder:
+                      description: Holder is the contributor or foreign field manager
+                        that currently owns it.
+                      type: string
+                  required:
+                  - fieldPath
+                  type: object
+                type: array
+              contributorCount:
+                description: |-
+                  ContributorCount is len(Contributors), surfaced as its own field only so it can be a printer
+                  column: "who is writing to this object?" should be answerable in one command.
+                format: int32
+                type: integer
+              contributors:
+                description: |-
+                  Contributors is the reference count. It is derived state, rebuilt from a live list on every
+                  reconcile, so a missed event self-heals rather than corrupting the count.
+                items:
+                  description: ContributorStatus is the tracker's record of one contributor.
+                  properties:
+                    creationTimestamp:
+                      description: |-
+                        CreationTimestamp is copied for the deterministic sort, which orders by
+                        (priority desc, creationTimestamp asc, uid asc).
+                      format: date-time
+                      type: string
+                    fieldManager:
+                      description: FieldManager is the SSA field manager this contributor
+                        owns its fields under.
+                      type: string
+                    lastAppliedHash:
+                      description: LastAppliedHash lets the tracker skip an apply
+                        when nothing has changed.
+                      type: string
+                    observedGeneration:
+                      description: ObservedGeneration is the contributor spec generation
+                        this record reflects.
+                      format: int64
+                      type: integer
+                    ownedPaths:
+                      description: OwnedPaths are the field paths this contributor
+                        set. ClientSideApply bookkeeping.
+                      items:
+                        type: string
+                      type: array
+                    patchRef:
+                      description: PatchRef identifies the contributor.
+                      properties:
+                        kind:
+                          description: Kind is ResourcePatch or ClusterResourcePatch.
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        uid:
+                          description: |-
+                            UID pins the identity, so a recreated contributor of the same name is not mistaken for the
+                            original. The delete-safety rule in DESIGN.md 6.2 matches on this.
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    priorValues:
+                      description: |-
+                        PriorValues holds what those paths contained before this contributor first touched them,
+                        for paths that already existed. ClientSideApply revert restores these rather than deleting
+                        the field, which is the correct behaviour when a contributor overwrote a pre-existing
+                        setting. Losing this on promotion would silently break revert.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    priority:
+                      description: Priority is copied from the contributor for deterministic
+                        ordering without a second read.
+                      format: int32
+                      type: integer
+                    state:
+                      description: State is this contributor's state on the target.
+                      enum:
+                      - Applied
+                      - Superseded
+                      - Conflicted
+                      - Releasing
+                      type: string
+                  required:
+                  - patchRef
+                  type: object
+                type: array
+              createdByOperator:
+                description: |-
+                  CreatedByOperator records that this operator created the target, which is half of the
+                  precondition for ever deleting it.
+                type: boolean
+              creatorPatchRef:
+                description: |-
+                  CreatorPatchRef is the contributor that actually created the target. Only it may request
+                  deletion. Losing this on promotion would silently break that guarantee.
+                properties:
+                  kind:
+                    description: Kind is ResourcePatch or ClusterResourcePatch.
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  uid:
+                    description: |-
+                      UID pins the identity, so a recreated contributor of the same name is not mistaken for the
+                      original. The delete-safety rule in DESIGN.md 6.2 matches on this.
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              observedBaseHash:
+                description: |-
+                  ObservedBaseHash is the hash of the base the target was created from, used to detect a
+                  second contributor supplying a different base.
+                type: string
+              observedResourceVersion:
+                description: |-
+                  ObservedResourceVersion is the target's resourceVersion after the last successful write,
+                  used to recognise and drop the echo of that write.
+                type: string
+              observedTargetUID:
+                description: |-
+                  ObservedTargetUID pins the target's identity. A change means the target was replaced out of
+                  band, which invalidates all ClientSideApply bookkeeping.
+                type: string
+              phase:
+                description: Phase is the tracker's overall state.
+                enum:
+                - Waiting
+                - Applied
+                - Conflicted
+                - Releasing
+                - Promoting
+                type: string
+              promotedTo:
+                description: |-
+                  PromotedTo fences this tracker and names its successor. Only ever set on a namespaced
+                  SharedResource; promotion is one-way and a ClusterSharedResource is never demoted.
+                properties:
+                  adopted:
+                    description: |-
+                      Adopted is set once the ClusterSharedResource has confirmed it holds the copied state. The
+                      namespaced tracker's finalizer is released only after this.
+                    type: boolean
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

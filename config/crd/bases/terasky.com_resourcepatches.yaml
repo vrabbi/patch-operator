@@ -1,0 +1,485 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: resourcepatches.terasky.com
+spec:
+  group: terasky.com
+  names:
+    kind: ResourcePatch
+    listKind: ResourcePatchList
+    plural: resourcepatches
+    shortNames:
+    - rp
+    singular: resourcepatch
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.target.kind
+      name: Target
+      type: string
+    - jsonPath: .spec.target.name
+      name: Name
+      type: string
+    - jsonPath: .spec.apply.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ResourcePatch contributes a slice of configuration to a shared object in its own namespace.
+
+          A ResourcePatch can only ever touch objects in its own namespace. That is structural, not a
+          policy check: the target namespace is forced to the ResourcePatch's namespace at admission and
+          re-checked at reconcile, and no field expresses anything else. The property therefore holds
+          regardless of how privileged the principal creating it is — which matters because a patch
+          emitted by Crossplane or kro is admitted as the orchestrator's near-cluster-admin ServiceAccount.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ResourcePatchSpec is the spec shared by ResourcePatch and ClusterResourcePatch. The two kinds
+              differ only in what Target may reach, not in shape.
+            properties:
+              apply:
+                description: Apply declares how the contribution reaches the target.
+                properties:
+                  conflictPolicy:
+                    default: Fail
+                    description: |-
+                      ConflictPolicy decides what happens when another manager owns a field this contributor
+                      claims.
+                    enum:
+                    - Fail
+                    - Priority
+                    - Force
+                    type: string
+                  fieldManager:
+                    description: |-
+                      FieldManager overrides the derived field manager name. Defaults to
+                      "patch-operator/<namespace>/<name>", hashed if that would exceed the API server's limit.
+                    type: string
+                  mode:
+                    default: ServerSideApply
+                    description: Mode selects server-side or client-side apply.
+                    enum:
+                    - ServerSideApply
+                    - ClientSideApply
+                    type: string
+                type: object
+              base:
+                description: |-
+                  Base is the seed manifest, consulted only when Lifecycle.OnMissing is Create. Under the
+                  default BaseReconcile=CreateOnly it is written once and never re-asserted.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              lifecycle:
+                description: Lifecycle declares create and release behaviour.
+                properties:
+                  adoptExisting:
+                    default: true
+                    description: |-
+                      AdoptExisting allows OnMissing=Create to adopt an object that already exists rather than
+                      failing on the create.
+                    type: boolean
+                  baseReconcile:
+                    default: CreateOnly
+                    description: BaseReconcile decides whether spec.base is re-asserted
+                      after creation.
+                    enum:
+                    - CreateOnly
+                    - Enforce
+                    type: string
+                  onMissing:
+                    default: Wait
+                    description: OnMissing decides what happens when the target does
+                      not exist.
+                    enum:
+                    - Fail
+                    - Wait
+                    - Create
+                    type: string
+                  onRelease:
+                    default: Revert
+                    description: OnRelease decides what happens to this contributor's
+                      fields when it is deleted.
+                    enum:
+                    - Revert
+                    - Orphan
+                    - Delete
+                    type: string
+                type: object
+              patch:
+                description: Patch is what this contributor always contributes.
+                properties:
+                  mergeKeys:
+                    description: MergeKeys declares identifying keys for list fields
+                      under ClientSideApply.
+                    items:
+                      description: |-
+                        MergeKey declares the identifying key for a list field, supplying the granularity a target's
+                        schema does not declare. Used under ClientSideApply.
+                      properties:
+                        key:
+                          description: Key is the field within each list element that
+                            identifies it, e.g. "host".
+                          minLength: 1
+                          type: string
+                        path:
+                          description: Path to the list field, in dotted notation,
+                            e.g. "spec.rules".
+                          minLength: 1
+                          type: string
+                      required:
+                      - key
+                      - path
+                      type: object
+                    type: array
+                  ops:
+                    description: Ops is the list of RFC 6902 operations, for the JSON6902
+                      type.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  type:
+                    default: StrategicMerge
+                    description: Type selects how Value or Ops is interpreted.
+                    enum:
+                    - StrategicMerge
+                    - Merge
+                    - JSON6902
+                    type: string
+                  value:
+                    description: Value is the partial object to merge, for StrategicMerge
+                      and Merge types.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                type: object
+              priority:
+                default: 100
+                description: |-
+                  Priority orders contributors deterministically and breaks conflicts under
+                  ConflictPolicy=Priority. Higher wins.
+                format: int32
+                type: integer
+              serviceAccountRef:
+                description: |-
+                  ServiceAccountRef makes the operator impersonate a ServiceAccount for every target write,
+                  so the API server enforces that identity's RBAC continuously rather than once at admission.
+                properties:
+                  name:
+                    description: Name of the ServiceAccount.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace of the ServiceAccount. Only settable on ClusterResourcePatch, and gated by an
+                      "impersonate" SubjectAccessReview against the requesting principal. On ResourcePatch the
+                      ServiceAccount is always resolved in the ResourcePatch's own namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              target:
+                description: Target identifies the object(s) this contributor contributes
+                  to.
+                properties:
+                  apiVersion:
+                    description: APIVersion of the target, e.g. "networking.k8s.io/v1".
+                    minLength: 1
+                    type: string
+                  kind:
+                    description: Kind of the target, e.g. "Ingress".
+                    minLength: 1
+                    type: string
+                  maxTargets:
+                    default: 100
+                    description: |-
+                      MaxTargets caps how many objects a Selector-mode contributor may resolve to. Exceeding it
+                      fails the contributor rather than silently truncating the match set.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  mode:
+                    default: Single
+                    description: Mode selects single-object or selector-based targeting.
+                    enum:
+                    - Single
+                    - Selector
+                    type: string
+                  name:
+                    description: Name of the target. Required in Single mode, forbidden
+                      in Selector mode.
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace of the target.
+
+                      On a ResourcePatch this is optional and defaults to the ResourcePatch's own namespace; any
+                      other value is rejected. On a ClusterResourcePatch it is required for namespaced kinds and
+                      forbidden for cluster-scoped ones.
+                    type: string
+                  namespaceSelector:
+                    description: |-
+                      NamespaceSelector restricts Selector mode to matching namespaces. Only valid on
+                      ClusterResourcePatch; forbidden on ResourcePatch, which is confined to its own namespace.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  selector:
+                    description: Selector matches targets by label in Selector mode.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                required:
+                - apiVersion
+                - kind
+                type: object
+            required:
+            - patch
+            - target
+            type: object
+          status:
+            description: ResourcePatchStatus is the status shared by ResourcePatch
+              and ClusterResourcePatch.
+            properties:
+              appliedGeneration:
+                description: AppliedGeneration is the spec generation last successfully
+                  applied to every target.
+                format: int64
+                type: integer
+              authorizedAs:
+                description: |-
+                  AuthorizedAs records the principal the admission webhook validated this contributor for, so
+                  the controller can re-run its SubjectAccessReview on a TTL. Admission is point-in-time;
+                  this closes the revoked-RBAC gap.
+                type: string
+              conditions:
+                description: |-
+                  Conditions follow the Crossplane condition shape so an XR readiness check or a kro status
+                  roll-up consumes them without an adapter.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastAuthorizedTime:
+                description: LastAuthorizedTime is when the SubjectAccessReview last
+                  succeeded.
+                format: date-time
+                type: string
+              observedTargets:
+                description: ObservedTargets lists the targets this contributor currently
+                  resolves to.
+                items:
+                  description: TargetStatus reports the state of one resolved target.
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    state:
+                      description: State mirrors this contributor's ContributorState
+                        on the tracker for this target.
+                      enum:
+                      - Applied
+                      - Superseded
+                      - Conflicted
+                      - Releasing
+                      type: string
+                    uid:
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+              sharedResourceRefs:
+                description: SharedResourceRefs points at the trackers that own those
+                  targets.
+                items:
+                  description: TrackerRef points at the tracker that owns a target
+                    this contributor contributes to.
+                  properties:
+                    kind:
+                      description: Kind is SharedResource or ClusterSharedResource.
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
