@@ -57,7 +57,7 @@ test-unit: fmt vet ## Run unit tests only (no envtest, no API server needed).
 
 .PHONY: test-e2e
 test-e2e: ## Run e2e tests. Requires a running Kind cluster (see .github/workflows/e2e.yaml).
-	go test ./test/e2e/ -v -ginkgo.v -timeout 30m
+	go test ./test/e2e/ -v -timeout 30m
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint.

@@ -89,10 +89,24 @@ Details worth knowing:
 Admission is point-in-time. A contributor created while its author held broad rights would keep
 working forever after those rights were revoked, because nothing ever touches the object again.
 
-So the webhook records the admitting principal in the `terasky.com/authorized-as` annotation, and
-the controller re-runs the SAR on a TTL (`--reauthorize-after`, default 10 minutes) and immediately
+So the admitting principal is recorded in the `terasky.com/authorized-as` annotation, and the
+controller re-runs the SAR on a TTL (`--reauthorize-after`, default 10 minutes) and immediately
 whenever the effective target or lifecycle differs from what was admitted. The result is the
 `Authorized` condition.
+
+The annotation is written by a **separate mutating webhook**, not by the validating one — a
+`ValidatingWebhookConfiguration`'s patch is discarded by the API server, so a validating handler
+can only admit or deny. Mutating admission runs first, so the validator still sees the final
+object and remains the authorization boundary; the mutator does no SAR of its own.
+
+Two details in that mutator matter:
+
+- The annotation is **always overwritten with the authenticated identity**, so a principal a
+  submitter writes into their own manifest is never believed.
+- It is re-stamped on CREATE and on any update that **changes the spec**, and left alone otherwise.
+  The operator itself issues updates to add and remove its finalizer; re-stamping there would
+  replace the tenant's identity with the operator's own service account, which is privileged, and
+  every later re-check would pass vacuously.
 
 When it goes false the operator **stops writing but does not revert**. Losing authorization is not
 the same as being released, and silently tearing down a tenant's ingress rule because an RBAC

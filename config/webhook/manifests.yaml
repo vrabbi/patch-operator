@@ -46,3 +46,48 @@ webhooks:
         apiVersions: [v1alpha1]
         resources: [clusterresourcepatches]
         operations: [CREATE, UPDATE, DELETE]
+---
+# The principal recorder must be a mutating webhook: a ValidatingWebhookConfiguration's patch is
+# discarded by the API server, so the authorized-as annotation cannot be written from the
+# validator. Mutating admission runs first, so the validator below still sees the final object.
+#
+# failurePolicy: Fail because a missing annotation silently disables the controller's TTL
+# re-authorization -- the check would find no principal and return without asserting anything. The
+# validating webhook is already a hard dependency, so this adds no availability cost.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mutating-webhook-configuration
+  labels:
+    app.kubernetes.io/name: patch-operator
+webhooks:
+  - name: mresourcepatch.terasky.com
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: webhook-service
+        namespace: system
+        path: /mutate-terasky-com-v1alpha1-resourcepatch
+    rules:
+      - apiGroups: [terasky.com]
+        apiVersions: [v1alpha1]
+        resources: [resourcepatches]
+        operations: [CREATE, UPDATE]
+  - name: mclusterresourcepatch.terasky.com
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: webhook-service
+        namespace: system
+        path: /mutate-terasky-com-v1alpha1-clusterresourcepatch
+    rules:
+      - apiGroups: [terasky.com]
+        apiVersions: [v1alpha1]
+        resources: [clusterresourcepatches]
+        operations: [CREATE, UPDATE]

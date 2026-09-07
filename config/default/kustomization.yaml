@@ -19,6 +19,9 @@ patches:
   - path: webhook_cainjection_patch.yaml
     target:
       kind: ValidatingWebhookConfiguration
+  - path: webhook_cainjection_mutating_patch.yaml
+    target:
+      kind: MutatingWebhookConfiguration
 replacements:
   # Point the webhook's CA bundle at the certificate the operator serves with.
   - source:
@@ -36,6 +39,14 @@ replacements:
           delimiter: /
           index: 0
           create: true
+      - select:
+          kind: MutatingWebhookConfiguration
+        fieldPaths:
+          - .metadata.annotations.[cert-manager.io/inject-ca-from]
+        options:
+          delimiter: /
+          index: 0
+          create: true
   - source:
       kind: Certificate
       group: cert-manager.io
@@ -45,6 +56,14 @@ replacements:
     targets:
       - select:
           kind: ValidatingWebhookConfiguration
+        fieldPaths:
+          - .metadata.annotations.[cert-manager.io/inject-ca-from]
+        options:
+          delimiter: /
+          index: 1
+          create: true
+      - select:
+          kind: MutatingWebhookConfiguration
         fieldPaths:
           - .metadata.annotations.[cert-manager.io/inject-ca-from]
         options:

@@ -225,6 +225,21 @@ func main() {
 				Authorizer: authorizer,
 				Decoder:    decoder,
 			}})
+
+		// The principal recorder is a mutating webhook, and has to be: a validating webhook's
+		// patch is discarded by the API server. Mutating admission runs first, so the validator
+		// still sees the final object.
+		mgr.GetWebhookServer().Register("/mutate-terasky-com-v1alpha1-resourcepatch",
+			&webhook.Admission{Handler: &patchwebhook.PrincipalRecorder{
+				New:     func() patchv1alpha1.Contributor { return &patchv1alpha1.ResourcePatch{} },
+				Decoder: decoder,
+			}})
+
+		mgr.GetWebhookServer().Register("/mutate-terasky-com-v1alpha1-clusterresourcepatch",
+			&webhook.Admission{Handler: &patchwebhook.PrincipalRecorder{
+				New:     func() patchv1alpha1.Contributor { return &patchv1alpha1.ClusterResourcePatch{} },
+				Decoder: decoder,
+			}})
 	} else {
 		setupLog.Info("admission webhooks are disabled; the SubjectAccessReview boundary is not in effect")
 	}

@@ -27,10 +27,16 @@ patches:
   - path: webhook_cainjection_patch.yaml
     target:
       kind: ValidatingWebhookConfiguration
-  # Drop the ClusterResourcePatch webhook: the kind does not exist in this install.
+  - path: webhook_cainjection_mutating_patch.yaml
+    target:
+      kind: MutatingWebhookConfiguration
+  # Drop the ClusterResourcePatch webhooks: the kind does not exist in this install.
   - path: webhook_namespaced_only_patch.yaml
     target:
       kind: ValidatingWebhookConfiguration
+  - path: webhook_namespaced_only_patch.yaml
+    target:
+      kind: MutatingWebhookConfiguration
   # Narrow the operator's own RBAC to match.
   - path: role_namespaced_only_patch.yaml
     target:
@@ -49,6 +55,11 @@ replacements:
         fieldPaths:
           - .metadata.annotations.[cert-manager.io/inject-ca-from]
         options: { delimiter: /, index: 0, create: true }
+      - select:
+          kind: MutatingWebhookConfiguration
+        fieldPaths:
+          - .metadata.annotations.[cert-manager.io/inject-ca-from]
+        options: { delimiter: /, index: 0, create: true }
   - source:
       kind: Certificate
       group: cert-manager.io
@@ -58,6 +69,11 @@ replacements:
     targets:
       - select:
           kind: ValidatingWebhookConfiguration
+        fieldPaths:
+          - .metadata.annotations.[cert-manager.io/inject-ca-from]
+        options: { delimiter: /, index: 1, create: true }
+      - select:
+          kind: MutatingWebhookConfiguration
         fieldPaths:
           - .metadata.annotations.[cert-manager.io/inject-ca-from]
         options: { delimiter: /, index: 1, create: true }

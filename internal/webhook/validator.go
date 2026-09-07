@@ -18,7 +18,6 @@ package webhook
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -93,12 +92,10 @@ func (v *ContributorValidator) Handle(ctx context.Context, req admission.Request
 			req.UserInfo.Username, denial.Check, denial.Reason))
 	}
 
-	// Record the admitting principal so the controller can re-run this check on a TTL. Admission
-	// is point-in-time; without this a contributor whose author later lost those rights would keep
-	// writing forever, because nothing ever touches the object again.
-	if op == OperationCreate || op == OperationUpdate {
-		return v.recordPrincipal(req, obj)
-	}
+	// The admitting principal is recorded by PrincipalRecorder, a separate mutating webhook: a
+	// ValidatingWebhookConfiguration's patch is discarded by the API server, so it cannot be done
+	// from here. Mutating admission runs first, so by now the annotation already names the
+	// requesting user.
 	return admission.Allowed("")
 }
 
@@ -126,30 +123,6 @@ func (v *ContributorValidator) decode(req admission.Request) (obj, oldObj patchv
 		return nil, nil, fmt.Errorf("admission request carried neither object nor oldObject")
 	}
 	return obj, oldObj, nil
-}
-
-// recordPrincipal patches the authorized-as annotation onto the admitted object.
-func (v *ContributorValidator) recordPrincipal(
-	req admission.Request,
-	obj patchv1alpha1.Contributor,
-) admission.Response {
-	existing := obj.GetAnnotations()[patchv1alpha1.AuthorizedAsAnnotation]
-	if existing == req.UserInfo.Username {
-		return admission.Allowed("")
-	}
-
-	annotations := obj.GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	annotations[patchv1alpha1.AuthorizedAsAnnotation] = req.UserInfo.Username
-	obj.SetAnnotations(annotations)
-
-	marshaled, err := json.Marshal(obj)
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-	return admission.PatchResponseFromRaw(req.Object.Raw, marshaled)
 }
 
 // Operations returns the admission operations this validator must be registered for.

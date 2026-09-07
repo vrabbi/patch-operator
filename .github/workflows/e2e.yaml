@@ -17,6 +17,10 @@ jobs:
   e2e:
     name: Kind e2e
     runs-on: ubuntu-latest
+    # Bounded deliberately: a wedged finalizer or a pod that never becomes ready would otherwise
+    # sit here until the default job limit, and a hang tells you far less than a timeout with the
+    # diagnostics step attached.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -47,6 +51,9 @@ jobs:
           kubectl -n patch-operator-system rollout status deploy/patch-operator-controller-manager --timeout=5m
 
       - name: Run e2e tests
+        env:
+          # Without this, a broken kubeconfig would make the suite skip itself and report green.
+          E2E_REQUIRE_CLUSTER: "1"
         run: make test-e2e
 
       # The operator's own logs are the only way to tell a test bug from an operator bug after the

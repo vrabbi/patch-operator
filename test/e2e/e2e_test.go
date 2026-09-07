@@ -44,6 +44,12 @@ const (
 
 func TestMain(m *testing.M) {
 	if !clusterReachable() {
+		// CI sets E2E_REQUIRE_CLUSTER, because there the skip path is indistinguishable from a
+		// green run and would report success while testing nothing.
+		if os.Getenv("E2E_REQUIRE_CLUSTER") != "" {
+			fmt.Fprintln(os.Stderr, "E2E_REQUIRE_CLUSTER is set but no cluster is reachable")
+			os.Exit(1)
+		}
 		fmt.Fprintln(os.Stderr, "no reachable cluster; skipping the e2e suite")
 		fmt.Fprintln(os.Stderr, "see .github/workflows/e2e.yaml for the expected setup")
 		os.Exit(0)
@@ -91,6 +97,30 @@ func kubectlWithStdin(stdin string, args ...string) (string, error) {
 		return string(out), fmt.Errorf("kubectl %s: %w", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// deleteContributor removes a contributor without blocking on its finalizer.
+//
+// kubectl's default wait blocks indefinitely if a finalizer never releases, which turns a product
+// bug into an opaque CI hang. Every caller already waits on the effect the deletion should have,
+// and that assertion names what it was waiting for.
+func deleteContributor(t *testing.T, kind, ns, name string) {
+	t.Helper()
+	args := []string{"delete", kind, name, "--wait=false"}
+	if ns != "" {
+		args = append(args, "-n", ns)
+	}
+	if out, err := kubectl(args...); err != nil {
+		t.Fatalf("deleting %s %s: %v\n%s", kind, name, err, out)
+	}
+}
+
+// requireGone asserts a contributor's finalizer was released and the object actually disappeared.
+func requireGone(t *testing.T, kind, ns, name string) {
+	t.Helper()
+	waitFor(t, kind+" "+name+" to be fully deleted (its finalizer released)", func() bool {
+		return !objectExists(kind, ns, name)
+	})
 }
 
 func clusterReachable() bool {
@@ -141,6 +171,8 @@ func newNamespace(t *testing.T) string {
 		t.Fatalf("creating namespace: %v", err)
 	}
 	t.Cleanup(func() {
+		// Contributors in this namespace hold finalizers, so a waiting delete could block on the
+		// operator; the namespace is reclaimed asynchronously either way.
 		_, _ = kubectl("delete", "namespace", name, "--wait=false", "--ignore-not-found")
 	})
 	return name
@@ -356,9 +388,7 @@ func TestObjectSurvivesItsCreator(t *testing.T) {
 		return d["key-a"] == "value-a" && d["key-b"] == "value-b"
 	})
 
-	if _, err := kubectl("delete", "resourcepatch", "creator", "-n", ns); err != nil {
-		t.Fatalf("deleting the creator: %v", err)
-	}
+	deleteContributor(t, "resourcepatch", ns, "creator")
 
 	waitFor(t, "the creator's field to be withdrawn", func() bool {
 		_, present := configMapData(ns, "shared")["key-a"]
@@ -371,6 +401,8 @@ func TestObjectSurvivesItsCreator(t *testing.T) {
 	if d := configMapData(ns, "shared"); d["key-b"] != "value-b" {
 		t.Errorf("the remaining contribution was disturbed: %#v", d)
 	}
+	// The finalizer must actually have been released, not merely the field withdrawn.
+	requireGone(t, "resourcepatch", ns, "creator")
 	consistently(t, 10*time.Second, "the object to keep existing", func() bool {
 		return objectExists("configmap", ns, "shared")
 	})
@@ -443,15 +475,14 @@ spec:
 	})
 
 	// A withdraws; only its rule may go.
-	if _, err := kubectl("delete", "resourcepatch", "rule-a", "-n", ns); err != nil {
-		t.Fatalf("deleting rule-a: %v", err)
-	}
+	deleteContributor(t, "resourcepatch", ns, "rule-a")
 	waitFor(t, "A's rule to be withdrawn", func() bool {
 		return !ingressHosts(ns, "shared-ingress")["a.example.com"]
 	})
 	if !ingressHosts(ns, "shared-ingress")["b.example.com"] {
 		t.Error("A's revert took the whole list, removing B's rule")
 	}
+	requireGone(t, "resourcepatch", ns, "rule-a")
 }
 
 // Appendix A.4: a namespaced target gains a cluster-scoped contributor and is promoted.
@@ -489,7 +520,8 @@ spec:
 `, ns, ns)
 	apply(t, clusterPatch)
 	t.Cleanup(func() {
-		_, _ = kubectl("delete", "clusterresourcepatch", "e2e-promotion-"+ns, "--ignore-not-found")
+		_, _ = kubectl("delete", "clusterresourcepatch", "e2e-promotion-"+ns,
+			"--ignore-not-found", "--wait=false")
 	})
 
 	waitFor(t, "the cluster-scoped contribution to land", func() bool {

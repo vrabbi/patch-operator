@@ -379,7 +379,10 @@ const (
 	TrackerFinalizer = "terasky.com/shared-resource"
 )
 
-// AuthorizedAsAnnotation records the admitting principal, written by the validating webhook.
+// AuthorizedAsAnnotation records the admitting principal.
+//
+// Written by the PrincipalRecorder mutating webhook rather than the validator: a validating
+// webhook's patch is discarded by the API server, so it cannot annotate what it admits.
 const AuthorizedAsAnnotation = "terasky.com/authorized-as"
 
 // FieldManagerPrefix prefixes every field manager this operator uses, so a conflict can be
