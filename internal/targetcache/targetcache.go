@@ -57,6 +57,11 @@ type Manager struct {
 	// slower.
 	Disabled map[schema.GroupVersionKind]bool
 
+	// watchFn registers the watch. Injectable so the bookkeeping -- the per-owner keying, the cap,
+	// and the retry-after-failure behaviour -- can be tested without standing up a manager and its
+	// cache, which are not what those rules are about.
+	watchFn func(controller.Controller, schema.GroupVersionKind, MapFunc) error
+
 	mu sync.Mutex
 	// watched is keyed by (owner, gvk) rather than by gvk alone.
 	//
@@ -84,12 +89,26 @@ func New(mgr manager.Manager, maxGVKs int, disabled []schema.GroupVersionKind) *
 	if maxGVKs <= 0 {
 		maxGVKs = DefaultMaxGVKs
 	}
-	return &Manager{
+	m := &Manager{
 		Cluster:  mgr,
 		MaxGVKs:  maxGVKs,
 		Disabled: d,
 		watched:  map[watchKey]bool{},
 	}
+	m.watchFn = m.watch
+	return m
+}
+
+// watch is the real registration: an informer for the kind, from the manager's shared cache.
+func (m *Manager) watch(
+	ctrl controller.Controller,
+	gvk schema.GroupVersionKind,
+	mapFn MapFunc,
+) error {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gvk)
+	return ctrl.Watch(source.Kind(m.Cluster.GetCache(), obj,
+		handler.TypedEnqueueRequestsFromMapFunc(mapFn)))
 }
 
 // Ensure starts watching a target GVK if it is not already watched.
@@ -133,11 +152,9 @@ func (m *Manager) Ensure(
 		return fmt.Errorf("watched-GVK cap of %d reached; cannot watch %s", m.MaxGVKs, gvk)
 	}
 
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(gvk)
-
-	if err := ctrl.Watch(source.Kind(m.Cluster.GetCache(), obj,
-		handler.TypedEnqueueRequestsFromMapFunc(mapFn))); err != nil {
+	// A failed registration is deliberately not recorded, so the kind is retried on the next
+	// reconcile rather than being silently left unwatched forever.
+	if err := m.watchFn(ctrl, gvk, mapFn); err != nil {
 		return fmt.Errorf("watching %s: %w", gvk, err)
 	}
 

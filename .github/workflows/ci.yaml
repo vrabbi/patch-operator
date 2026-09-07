@@ -97,4 +97,4 @@ jobs:
       # single-namespace use, so a break in it is a real break.
       - run: make kustomize
       - run: ./bin/kustomize build config/default > /dev/null
-      - run: ./bin/kustomize build config/overlays/namespaced-only > /dev/null
+      - run: ./bin/kustomize build --load-restrictor LoadRestrictionsNone config/overlays/namespaced-only > /dev/null

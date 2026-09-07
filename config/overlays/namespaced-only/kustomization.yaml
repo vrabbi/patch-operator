@@ -18,10 +18,10 @@ resources:
   - ../../rbac
   - ../../manager
   - ../../webhook
-  - ../../default/cert.yaml
+  - ../../cert
   - crd
 patches:
-  - path: ../../default/webhook_cainjection_patch.yaml
+  - path: webhook_cainjection_patch.yaml
     target:
       kind: ValidatingWebhookConfiguration
   # Drop the ClusterResourcePatch webhook: the kind does not exist in this install.

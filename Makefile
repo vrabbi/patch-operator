@@ -44,9 +44,12 @@ vet: ## Run go vet.
 	go vet ./...
 
 .PHONY: test
+# -coverpkg attributes the integration suite's coverage to the packages it exercises. Without it
+# the controllers read as barely covered, because the tests that drive them live in another package.
 test: manifests generate fmt vet setup-envtest ## Run unit and integration (envtest) tests.
 	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-		go test $$(go list ./... | grep -v /test/e2e) -coverprofile cover.out -timeout 20m
+		go test $$(go list ./... | grep -v /test/e2e) \
+			-coverpkg=./api/...,./internal/... -coverprofile cover.out -timeout 20m
 
 .PHONY: test-unit
 test-unit: fmt vet ## Run unit tests only (no envtest, no API server needed).
@@ -104,7 +107,11 @@ undeploy: kustomize ## Undeploy the controller from the cluster.
 .PHONY: deploy-namespaced-only
 deploy-namespaced-only: manifests kustomize ## Deploy without the cluster-scoped CRDs or cluster write RBAC.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
-	$(KUSTOMIZE) build config/overlays/namespaced-only | kubectl apply -f -
+	$(KUSTOMIZE) build $(NAMESPACED_ONLY_FLAGS) config/overlays/namespaced-only | kubectl apply -f -
+
+# Selecting a subset of the generated CRDs means referencing files above the overlay's directory,
+# which kustomize permits only with this flag.
+NAMESPACED_ONLY_FLAGS ?= --load-restrictor LoadRestrictionsNone
 
 ##@ Docs
 
