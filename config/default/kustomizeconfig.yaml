@@ -1,0 +1,12 @@
+# Teaches kustomize that cert-manager's issuerRef.name is a name reference.
+#
+# Without this, namePrefix renames the Issuer but leaves the Certificate pointing at the old name,
+# so the certificate is never issued, the webhook's serving Secret never appears, and every
+# operator pod hangs forever on FailedMount. The e2e job caught exactly that.
+nameReference:
+  - kind: Issuer
+    group: cert-manager.io
+    fieldSpecs:
+      - kind: Certificate
+        group: cert-manager.io
+        path: spec/issuerRef/name

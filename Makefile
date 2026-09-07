@@ -190,7 +190,7 @@ ln -sf $(1)-$(3) $(1)
 endef
 
 CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
-CRD_REF_DOCS_VERSION ?= v0.1.0
+CRD_REF_DOCS_VERSION ?= v0.3.0
 
 .PHONY: crd-ref-docs
 crd-ref-docs: $(CRD_REF_DOCS)
