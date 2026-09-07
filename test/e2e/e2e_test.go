@@ -27,6 +27,7 @@ limitations under the License.
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -63,13 +64,23 @@ func TestMain(m *testing.M) {
 
 // --- kubectl helpers ---
 
+// kubectl runs a command and returns its *stdout* only.
+//
+// Keeping stderr out of the return value is not tidiness. `kubectl get` writes "No resources
+// found" to stderr and still exits 0, so a combined-output helper makes an empty result
+// indistinguishable from a one-line result, and any caller checking for emptiness or parsing JSON
+// silently misreads it. stderr is folded into the error instead, where it is still visible when a
+// command genuinely fails.
 func kubectl(args ...string) (string, error) {
 	cmd := exec.Command("kubectl", args...)
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
 	if err != nil {
-		return string(out), fmt.Errorf("kubectl %s: %w\n%s", strings.Join(args, " "), err, out)
+		return strings.TrimSpace(string(stdout)),
+			fmt.Errorf("kubectl %s: %w\n%s", strings.Join(args, " "), err, stderr.String())
 	}
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimSpace(string(stdout)), nil
 }
 
 func apply(t *testing.T, manifest string) {
@@ -166,8 +177,8 @@ func newNamespace(t *testing.T) string {
 	if len(name) > 60 {
 		name = name[:60]
 	}
-	if out, err := kubectl("create", "namespace", name); err != nil &&
-		!strings.Contains(out, "already exists") {
+	if _, err := kubectl("create", "namespace", name); err != nil &&
+		!strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("creating namespace: %v", err)
 	}
 	t.Cleanup(func() {
@@ -194,6 +205,29 @@ func configMapData(ns, name string) map[string]string {
 		return map[string]string{}
 	}
 	return cm.Data
+}
+
+// countItems returns how many objects of a kind exist, or -1 if the list could not be read.
+//
+// Counting decoded items rather than matching lines of `-o name` output: a name substring can
+// appear in an unrelated object's name, and "no items" and "one item" are then a single-character
+// difference in a string comparison.
+func countItems(kind, ns string) int {
+	args := []string{"get", kind, "-o", "json"}
+	if ns != "" {
+		args = append(args, "-n", ns)
+	}
+	out, err := kubectl(args...)
+	if err != nil {
+		return -1
+	}
+	var list struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		return -1
+	}
+	return len(list.Items)
 }
 
 // getJSON reads an object as JSON and decodes it into out.
@@ -371,8 +405,7 @@ func TestSharedTargetWithTwoContributors(t *testing.T) {
 
 	// One tracker, in the contributors' namespace.
 	waitFor(t, "a SharedResource to track the target", func() bool {
-		out, err := kubectl("get", "sharedresources", "-n", ns, "-o", "name")
-		return err == nil && strings.Count(out, "sharedresource") == 1
+		return countItems("sharedresources", ns) == 1
 	})
 }
 
@@ -530,8 +563,7 @@ spec:
 
 	// The namespaced tracker must be retired, leaving exactly one writer.
 	waitFor(t, "the namespaced tracker to be retired", func() bool {
-		out, err := kubectl("get", "sharedresources", "-n", ns, "-o", "name")
-		return err == nil && out == ""
+		return countItems("sharedresources", ns) == 0
 	})
 	waitFor(t, "a ClusterSharedResource to own the target", func() bool {
 		return len(clusterTrackersForNamespace(ns)) == 1
