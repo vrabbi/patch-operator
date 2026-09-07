@@ -450,3 +450,7 @@ func deepCopyValue(v any) any {
 // DeepCopyMap exposes the deep copy used internally, so callers merging into a live object never
 // alias the informer cache.
 func DeepCopyMap(in map[string]any) map[string]any { return deepCopyMap(in) }
+
+// DeepCopyValue exposes the deep copy for a single value, so a caller merging into a live object
+// never aliases the informer cache.
+func DeepCopyValue(v any) any { return deepCopyValue(v) }
