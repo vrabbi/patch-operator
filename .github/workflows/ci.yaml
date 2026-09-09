@@ -100,3 +100,12 @@ jobs:
       - run: make kustomize
       - run: ./bin/kustomize build config/default > /dev/null
       - run: ./bin/kustomize build --load-restrictor LoadRestrictionsNone config/overlays/namespaced-only > /dev/null
+      # Building proves only that they render. These assert what they contain -- which is how a
+      # namespace-only overlay that stripped the operator's impersonation rights, while keeping the
+      # cluster-scoped grants it existed to remove, built cleanly for as long as it did.
+      - name: Assert what the overlays render
+        env:
+          # Without this the suite skips itself when bin/kustomize is absent, and a skip reads as a
+          # pass.
+          REQUIRE_KUSTOMIZE: "1"
+        run: go test ./test/manifests/ -v

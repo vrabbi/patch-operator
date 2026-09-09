@@ -149,12 +149,9 @@ func (r *ContributorReconciler[T, L]) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	// Enqueue each tracker so it re-renders with this contributor included. The tracker is the
-	// only writer, so registration alone changes nothing on the target until it reconciles.
-	for _, ref := range trackers {
-		r.enqueueTracker(ctx, ref)
-	}
-
+	// No explicit nudge to the trackers: each one watches both contributor kinds without a
+	// predicate, so the status write above is itself the event that wakes them. The tracker is the
+	// only writer, so registration changes nothing on the target until it reconciles.
 	return ctrl.Result{RequeueAfter: requeue}, nil
 }
 
@@ -187,7 +184,6 @@ func (r *ContributorReconciler[T, L]) reconcileDelete(ctx context.Context, obj T
 		}
 		if tracker.GetTrackerStatus().FindContributor(ref) != nil {
 			stillRegistered = true
-			r.enqueueTrackerObject(ctx, tracker)
 		}
 	}
 

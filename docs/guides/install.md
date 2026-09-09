@@ -30,7 +30,9 @@ tested and signed even if a tag is later moved.
 **Prefer this when no shared object is ever contributed to from outside its own namespace.**
 
 It omits the cluster-scoped CRDs entirely, so cross-namespace contribution is not merely denied but
-**absent** — there is no API to express it — and the operator needs no cluster-wide write RBAC.
+**absent** — there is no API to express it, so nothing can ask the operator to write outside a
+contributor's own namespace. The operator's ClusterRole still carries the wildcard target grant,
+which cannot be narrowed at install time; see [Security](../security.md#what-the-operators-own-rbac-looks-like).
 
 ```bash
 kubectl apply -f https://github.com/vrabbi/patch-operator/releases/latest/download/install-namespaced-only.yaml

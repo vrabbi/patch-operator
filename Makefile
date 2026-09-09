@@ -46,7 +46,7 @@ vet: ## Run go vet.
 .PHONY: test
 # -coverpkg attributes the integration suite's coverage to the packages it exercises. Without it
 # the controllers read as barely covered, because the tests that drive them live in another package.
-test: manifests generate fmt vet setup-envtest ## Run unit and integration (envtest) tests.
+test: manifests generate fmt vet setup-envtest kustomize ## Run unit and integration (envtest) tests.
 	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
 		go test $$(go list ./... | grep -v /test/e2e) \
 			-coverpkg=./api/...,./internal/... -coverprofile cover.out -timeout 20m

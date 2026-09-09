@@ -26,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	patchv1alpha1 "github.com/vrabbi/patch-operator/api/v1alpha1"
@@ -89,27 +88,6 @@ func (r *ContributorReconciler[T, L]) getTracker(
 		return nil, err
 	}
 	return obj, nil
-}
-
-// enqueueTracker nudges a tracker to reconcile. Registration alone changes nothing on the target,
-// since the tracker is the only writer.
-func (r *ContributorReconciler[T, L]) enqueueTracker(ctx context.Context, ref patchv1alpha1.TrackerRef) {
-	tracker, err := r.getTracker(ctx, ref)
-	if err != nil {
-		return
-	}
-	r.enqueueTrackerObject(ctx, tracker)
-}
-
-// enqueueTrackerObject touches a tracker's annotations to provoke a reconcile.
-//
-// controller-runtime offers no direct "enqueue this object" from outside a controller's own event
-// sources, and the tracker watches its contributors, so the contributor change will wake it. This
-// is a belt-and-braces nudge for the case where the contributor's own update was status-only and
-// therefore filtered out.
-func (r *ContributorReconciler[T, L]) enqueueTrackerObject(ctx context.Context, tracker patchv1alpha1.Tracker) {
-	log.FromContext(ctx).V(2).Info("tracker will reconcile via its contributor watch",
-		"tracker", tracker.GetName(), "kind", tracker.TrackerKind())
 }
 
 // setCond upserts a condition on a contributor status.

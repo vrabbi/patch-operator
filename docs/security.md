@@ -44,8 +44,12 @@ That matters because it holds **regardless of how privileged the principal creat
   the containment above a real boundary rather than a convention.**
 
 - **Consider a namespace-only install.** Omit the cluster-scoped CRDs entirely and cross-namespace
-  contribution is not merely denied but *absent* — there is no API to express it, and the operator
-  needs no cluster-wide write RBAC. See [Install](guides/install.md).
+  contribution is not merely denied but *absent* — there is no API to express it, so nothing can ask
+  the operator to write outside a contributor's own namespace. See [Install](guides/install.md).
+
+    Note what this does **not** do: the operator's ClusterRole still carries the wildcard target
+    grant below, because the set of target kinds is not known at install time. What changes is that
+    no API exists to direct that power across a namespace boundary.
 
     ```bash
     make deploy-namespaced-only IMG=...
@@ -163,8 +167,10 @@ contributor will name.
 
 Two things bound that, and they are the whole point of the design: a `ResourcePatch` cannot reach
 outside its own namespace whatever the requester's rights, and `serviceAccountRef` moves the write
-path onto a tenant identity the API server checks on every write. A namespace-only install drops the
-cluster-scoped half entirely.
+path onto a tenant identity the API server checks on every write. A namespace-only install removes
+the cluster-scoped *kinds*, so nothing can direct this grant across a namespace boundary — but the
+grant itself remains, and must: the operator serves every namespace and cannot know in advance which
+target kinds a contributor will name.
 
 The `impersonate` grant is what `serviceAccountRef` needs, gated at admission by the `impersonate`
 SAR described above.

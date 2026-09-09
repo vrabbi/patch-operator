@@ -51,9 +51,9 @@ about the requester is weak for exactly the patches that matter most. Containmen
 about the requester at all.
 
 So: **grant `ResourcePatch` freely** in tenant namespaces, and **treat `ClusterResourcePatch` as a
-platform-team grant**. A namespace-only install — omitting the cluster CRDs entirely — needs no
-cluster-wide write RBAC. SubjectAccessReview on every mutation and optional ServiceAccount
-impersonation back this up; see §7.
+platform-team grant**. A namespace-only install — omitting the cluster CRDs entirely — leaves no API
+for reaching across a namespace boundary at all. SubjectAccessReview on every mutation and optional
+ServiceAccount impersonation back this up; see §7.
 
 ## Quick start
 
@@ -65,7 +65,7 @@ kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=5m
 make deploy IMG=ghcr.io/vrabbi/patch-operator:latest
 
 # Or, when no shared object is ever contributed to from outside its own namespace:
-# omits the cluster-scoped CRDs entirely and needs no cluster-wide write RBAC.
+# omits the cluster-scoped CRDs entirely, so nothing can express a cross-namespace write.
 make deploy-namespaced-only IMG=ghcr.io/vrabbi/patch-operator:latest
 ```
 

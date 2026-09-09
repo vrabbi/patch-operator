@@ -37,11 +37,11 @@ patches:
   - path: webhook_namespaced_only_patch.yaml
     target:
       kind: MutatingWebhookConfiguration
-  # Narrow the operator's own RBAC to match.
+  # Narrow the operator's own RBAC to match. A strategic merge, so it needs no target selector:
+  # kustomize matches on the patch's own kind and name.
   - path: role_namespaced_only_patch.yaml
-    target:
-      kind: ClusterRole
-      name: manager-role
+  # And remove the tenant role for the kind this install does not have.
+  - path: tenant_role_namespaced_only_patch.yaml
 replacements:
   - source:
       kind: Certificate
