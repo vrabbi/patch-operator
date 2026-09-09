@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Only the namespaced pair. The cluster-scoped kinds are deliberately absent, which is what makes
+# cross-namespace contribution unexpressible rather than merely denied.
+#
+# controller-gen writes every CRD to config/crd/bases, so selecting a subset means referencing
+# files above this directory. kustomize refuses that unless built with
+# --load-restrictor LoadRestrictionsNone, which is why `make deploy-namespaced-only` passes it.
+resources:
+  - ../../../crd/bases/terasky.com_resourcepatches.yaml
+  - ../../../crd/bases/terasky.com_sharedresources.yaml

@@ -1,0 +1,27 @@
+# cert-manager issues the webhook's serving certificate. An authorization webhook has to be
+# reachable over TLS the API server trusts, and rotating that by hand is a footgun.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned-issuer
+  namespace: system
+  labels:
+    app.kubernetes.io/name: patch-operator
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: serving-cert
+  namespace: system
+  labels:
+    app.kubernetes.io/name: patch-operator
+spec:
+  dnsNames:
+    - patch-operator-webhook-service.patch-operator-system.svc
+    - patch-operator-webhook-service.patch-operator-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: selfsigned-issuer
+  secretName: webhook-server-cert

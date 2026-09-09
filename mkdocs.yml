@@ -1,0 +1,78 @@
+site_name: patch-operator
+site_description: >-
+  Reference-counted, revertible, multi-writer field contribution for shared Kubernetes resources.
+site_url: https://vrabbi.github.io/patch-operator/
+repo_url: https://github.com/vrabbi/patch-operator
+repo_name: vrabbi/patch-operator
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.code.annotate
+    - search.highlight
+    - search.suggest
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: [docs]
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Security: security.md
+  - Concepts:
+      - The shared-resource problem: concepts/shared-resources.md
+      - Scope model: concepts/scope-model.md
+      - Apply modes: concepts/apply-modes.md
+      - Lifecycle and reference counting: concepts/lifecycle.md
+      - Conflicts: concepts/conflicts.md
+      - Promotion: concepts/promotion.md
+  - Guides:
+      - Install: guides/install.md
+      - With Crossplane: guides/crossplane.md
+      - With kro: guides/kro.md
+      - Selector mode: guides/selector-mode.md
+      - Troubleshooting: guides/troubleshooting.md
+  - Reference:
+      - API: reference/api.md
+      - Design document: reference/design.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/vrabbi/patch-operator

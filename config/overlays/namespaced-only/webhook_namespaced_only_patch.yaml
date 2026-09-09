@@ -1,0 +1,3 @@
+# The ClusterResourcePatch webhook has nothing to validate in this install.
+- op: remove
+  path: /webhooks/1

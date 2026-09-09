@@ -1,0 +1,9 @@
+# Drop the privileged tenant role: there is no ClusterResourcePatch kind in this install, so the
+# grant cannot work. Leaving it would be worse than noise -- an admin could bind it believing it
+# does something, and if the cluster-scoped CRDs were later installed by anything else the binding
+# would quietly become live.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clusterresourcepatch-editor
+$patch: delete

@@ -767,12 +767,27 @@ cluster admins must remember to maintain.
 Admission is point-in-time. A contributor created while its author held broad rights keeps working
 forever after those rights are revoked, because nothing ever touches the CR again.
 
-So: the webhook records the admitting principal in an immutable annotation, and the controller
-re-runs the SAR before writes on a TTL (~10 minutes), and immediately whenever the effective target
+So: admission records the admitting principal in the `terasky.com/authorized-as` annotation, and the
+controller re-runs the SAR before writes on a TTL (~10 minutes), and immediately whenever the effective target
 or lifecycle differs from what was admitted. The result is the `Authorized` condition; when it goes
 false the operator stops writing and says why — it does **not** revert, because losing authorization
 is not the same as being released, and silently tearing down a tenant's ingress rule because an RBAC
 binding was reorganised would be worse than the exposure.
+
+The annotation has to be written by a *separate mutating webhook*: a `ValidatingWebhookConfiguration`'s
+patch is discarded by the API server, so the validating handler can only admit or deny. Mutating
+admission runs first, so the validator still sees the final object and remains the authorization
+boundary; the mutator issues no SAR of its own. It always overwrites the annotation with the
+authenticated identity, so a value a submitter puts in their own manifest is never believed, and it
+re-stamps only on CREATE and on updates that change the spec — the operator's own finalizer updates
+must not replace the tenant's identity with the operator's (privileged) service account, which would
+make every later re-check pass vacuously.
+
+What is recorded is the *whole* identity — username, UID, groups and extras — not just the name.
+RBAC is bound to groups far more often than to usernames, so a review carrying only a name denies
+principals who are still fully authorized: a cluster admin authenticating by client certificate is
+authorized through `system:masters`, an OIDC user through their provider's groups. The re-check
+must ask the same question admission asked, with the same inputs.
 
 ### 7.3 `spec.serviceAccountRef` — impersonation
 

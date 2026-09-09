@@ -1,0 +1,60 @@
+# The operator's ClusterRole for the namespace-only install: the base role minus every right over
+# the cluster-scoped kinds this install does not serve.
+#
+# This is a strategic-merge patch that declares the whole `rules` list, not a JSON6902 patch over
+# rule indices. `ClusterRole.rules` has no patch merge key, so a strategic merge replaces the list
+# wholesale, which is exactly what is wanted here.
+#
+# The previous version indexed into /rules/0, /rules/1 and /rules/2 believing those were the
+# terasky.com rules. They are not -- they are events, impersonation and namespaces -- so it stripped
+# the operator's ability to record events, to resolve namespaces, and to impersonate (silently
+# disabling spec.serviceAccountRef, the strongest control in the design), while leaving the
+# cluster-scoped grants it existed to remove fully intact. `kustomize build` still succeeded, since
+# the paths existed. Indices into controller-gen output are brittle in any case: adding one
+# +kubebuilder:rbac marker reorders the rules.
+#
+# The cost of declaring the list is that a new base rule does not reach this overlay automatically.
+# That direction of drift leaves the operator under-privileged rather than over-privileged, and
+# test/manifests is what makes it visible instead of silent.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  # Pre-namePrefix name: kustomize matches patches on the original name.
+  name: manager-role
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  # Impersonation is why spec.serviceAccountRef can drop privilege onto a tenant identity the API
+  # server checks on every write. Removing it does not fail loudly -- it just stops working.
+  - apiGroups: [""]
+    resources: [groups, serviceaccounts, users]
+    verbs: [impersonate]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+  # The wildcard target grant stays, deliberately. The operator serves every namespace and cannot
+  # know at install time which target kinds a contributor will name, so this cannot be narrowed
+  # here. What the namespace-only install removes is the *API* for reaching across a namespace
+  # boundary: with no ClusterResourcePatch kind installed, nothing can ask the operator to write
+  # outside a contributor's own namespace.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create, delete, get, list, patch, update, watch]
+  # The contributor and tracker kinds this install actually serves. No clusterresourcepatches or
+  # clustersharedresources: those CRDs are not installed here.
+  - apiGroups: [terasky.com]
+    resources: [resourcepatches, sharedresources]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [terasky.com]
+    resources: [resourcepatches/finalizers, sharedresources/finalizers]
+    verbs: [update]
+  - apiGroups: [terasky.com]
+    resources: [resourcepatches/status, sharedresources/status]
+    verbs: [get, patch, update]

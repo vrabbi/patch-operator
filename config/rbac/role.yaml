@@ -1,0 +1,94 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - groups
+  - serviceaccounts
+  - users
+  verbs:
+  - impersonate
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - terasky.com
+  resources:
+  - clusterresourcepatches
+  - clustersharedresources
+  - resourcepatches
+  - sharedresources
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - terasky.com
+  resources:
+  - clusterresourcepatches/finalizers
+  - clustersharedresources/finalizers
+  - resourcepatches/finalizers
+  - sharedresources/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - terasky.com
+  resources:
+  - clusterresourcepatches/status
+  - clustersharedresources/status
+  - resourcepatches/status
+  - sharedresources/status
+  verbs:
+  - get
+  - patch
+  - update

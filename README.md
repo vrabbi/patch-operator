@@ -51,13 +51,44 @@ about the requester is weak for exactly the patches that matter most. Containmen
 about the requester at all.
 
 So: **grant `ResourcePatch` freely** in tenant namespaces, and **treat `ClusterResourcePatch` as a
-platform-team grant**. A namespace-only install — omitting the cluster CRDs entirely — needs no
-cluster-wide write RBAC. SubjectAccessReview on every mutation and optional ServiceAccount
-impersonation back this up; see §7.
+platform-team grant**. A namespace-only install — omitting the cluster CRDs entirely — leaves no API
+for reaching across a namespace boundary at all. SubjectAccessReview on every mutation and optional
+ServiceAccount impersonation back this up; see §7.
+
+## Quick start
+
+```bash
+# cert-manager issues the webhook's serving certificate
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.1/cert-manager.yaml
+kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=5m
+
+make deploy IMG=ghcr.io/vrabbi/patch-operator:latest
+
+# Or, when no shared object is ever contributed to from outside its own namespace:
+# omits the cluster-scoped CRDs entirely, so nothing can express a cross-namespace write.
+make deploy-namespaced-only IMG=ghcr.io/vrabbi/patch-operator:latest
+```
+
+## Development
+
+```bash
+make test          # unit + envtest integration tests
+make lint          # golangci-lint, built with the toolchain pinned from go.mod
+make docs-build    # mkdocs build --strict
+make test-e2e      # requires a Kind cluster with the operator deployed
+```
+
+`make test` resolves envtest binaries with `setup-envtest`; no cluster is needed. The e2e suite
+needs a real cluster and is run by CI.
 
 ## Read next
 
-- **[DESIGN.md](./DESIGN.md)** — the full design. Start at §7 (Authorization).
+- **[Documentation site](https://vrabbi.github.io/patch-operator/)** — concepts, guides and the
+  generated API reference.
+- **[Security](https://vrabbi.github.io/patch-operator/security/)** — read this before deploying.
+  This is an "apply arbitrary fields to arbitrary objects" primitive, and the authorization model is
+  the hard part.
+- **[DESIGN.md](./DESIGN.md)** — the full design and the reasoning behind it.
 - **[examples/namespaced/](./examples/namespaced/)** — the contained, low-privilege pattern.
 - **[examples/cluster/](./examples/cluster/)** — cross-namespace and cluster-scoped targets.
 - **[examples/](./examples/)** — how Crossplane and kro emit each kind.

@@ -1,0 +1,54 @@
+# Roles a platform team binds to tenants, and the reason the scope split exists.
+#
+# resourcepatch-editor is safe to grant broadly, in tenant namespaces, including to Crossplane's
+# and kro's ServiceAccounts. A ResourcePatch cannot reach outside its own namespace whatever the
+# principal creating it can do, so the blast radius of this grant is one namespace regardless of
+# what a Composition author writes.
+#
+# clusterresourcepatch-editor is the privileged counterpart: it is the only way to cross a
+# namespace boundary or touch a cluster-scoped object. Withholding it from the orchestrators is
+# what makes the containment above a real boundary rather than a convention -- see the security
+# page in the docs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: resourcepatch-editor
+  labels:
+    app.kubernetes.io/name: patch-operator
+rules:
+  - apiGroups: [terasky.com]
+    resources: [resourcepatches]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [terasky.com]
+    resources: [resourcepatches/status]
+    verbs: [get]
+  # Read-only on the tracker, so a tenant can see who else contributes to a shared object in their
+  # namespace without being able to edit operator-owned state.
+  - apiGroups: [terasky.com]
+    resources: [sharedresources]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: resourcepatch-viewer
+  labels:
+    app.kubernetes.io/name: patch-operator
+rules:
+  - apiGroups: [terasky.com]
+    resources: [resourcepatches, sharedresources]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: clusterresourcepatch-editor
+  labels:
+    app.kubernetes.io/name: patch-operator
+rules:
+  - apiGroups: [terasky.com]
+    resources: [clusterresourcepatches]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [terasky.com]
+    resources: [clusterresourcepatches/status, clustersharedresources]
+    verbs: [get, list, watch]

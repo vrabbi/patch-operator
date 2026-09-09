@@ -1,0 +1,281 @@
+# Publishes a release: the operator image, then the install manifests, then a release body
+# recording exactly what was signed.
+#
+# Everything is gated on the same CI and e2e suites a pull request gets. That is deliberate: this
+# operator holds broad RBAC and is the only writer to objects other controllers also manage, so a
+# tag that skipped the suites would ship exactly the failure modes the suites exist to catch. The
+# e2e job in particular is the only place real RBAC and serving webhooks are exercised.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/vrabbi/patch-operator
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yaml
+
+  e2e:
+    name: E2E
+    uses: ./.github/workflows/e2e.yaml
+
+  image:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    needs: [ci, e2e]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless cosign signing and GitHub attestations, both via OIDC
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve the version
+        id: version
+        # A workflow_dispatch run has no tag, so the release is built from the commit instead and
+        # named for it. That keeps a manual run publishable without pretending it is a version.
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,enable=${{ github.ref_type != 'tag' }}
+            # `latest` must not follow a pre-release: v1.0.0-rc.1 is not what a user asking for
+            # `latest` wants. is_default_branch is no use here — a tag push never satisfies it —
+            # so this keys on the tag itself carrying no pre-release suffix.
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Sign image (cosign keyless)
+        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: Generate image SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-image.spdx.json
+          artifact-name: sbom-image.spdx.json
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom-image.spdx.json
+          push-to-registry: true
+
+  installer:
+    name: Build install manifests
+    runs-on: ubuntu-latest
+    needs: image
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Render both overlays at the released digest
+        # Pinned by digest, not by tag: an installed manifest should keep deploying the bytes that
+        # were tested and signed, even if the tag is later moved.
+        run: make build-installer IMG="${IMAGE}@${{ needs.image.outputs.digest }}"
+
+      - name: Checksum the manifests
+        run: |
+          cd dist
+          sha256sum install.yaml install-namespaced-only.yaml > checksums.txt
+          cat checksums.txt
+
+      - name: Sign the checksums (cosign keyless)
+        # Signing the checksum file rather than each manifest: one signature covers both, and
+        # verifying the file then verifies whichever manifest the user downloaded.
+        run: |
+          cd dist
+          cosign sign-blob --yes \
+            --output-signature checksums.txt.sig \
+            --output-certificate checksums.txt.pem \
+            checksums.txt
+
+      - name: Attest manifest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/install.yaml
+            dist/install-namespaced-only.yaml
+
+      - name: Upload manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-manifests
+          path: |
+            dist/install.yaml
+            dist/install-namespaced-only.yaml
+            dist/checksums.txt
+            dist/checksums.txt.sig
+            dist/checksums.txt.pem
+
+  publish-release:
+    name: Publish the GitHub release
+    runs-on: ubuntu-latest
+    needs: [image, installer]
+    # A manual run builds and signs everything but publishes no release: there is no tag to attach
+    # one to, and inventing a tag here would create a version nobody asked for.
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write # creating the release and uploading its assets
+    steps:
+      - name: Download the install manifests
+        uses: actions/download-artifact@v4
+        with:
+          name: install-manifests
+          path: dist
+
+      - name: Download the image SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-image.spdx.json
+          path: sboms
+
+      - name: Write the release body
+        env:
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          {
+            echo "## Install"
+            echo ""
+            echo '```bash'
+            echo "# cert-manager issues the webhook's serving certificate and must be present first."
+            echo "kubectl apply -f https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/install.yaml"
+            echo '```'
+            echo ""
+            echo "\`install-namespaced-only.yaml\` is the same install without the cluster-scoped CRDs:"
+            echo "cross-namespace contribution is then absent rather than merely denied, and the"
+            echo "operator needs no cluster-wide write RBAC."
+            echo ""
+            echo "Both manifests pin the image **by digest**, so they keep deploying the bytes this"
+            echo "release tested and signed even if a tag is later moved."
+            echo ""
+            echo "## Signed artifacts"
+            echo ""
+            echo "| Artifact | Digest |"
+            echo "|---|---|"
+            echo "| \`${IMAGE}\` | \`${DIGEST}\` |"
+            echo ""
+            echo "The image is signed keylessly with [cosign](https://github.com/sigstore/cosign)"
+            echo "using this workflow's GitHub OIDC identity, and carries build-provenance and SBOM"
+            echo "attestations. The install manifests' \`checksums.txt\` is cosign-signed and carries"
+            echo "a build-provenance attestation."
+            echo ""
+            echo "### Verify the image"
+            echo ""
+            echo '```bash'
+            echo "cosign verify \\"
+            echo "  --certificate-identity-regexp '^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/release\\.yml@refs/tags/.*\$' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  ${IMAGE}@${DIGEST}"
+            echo ""
+            echo "gh attestation verify oci://${IMAGE}@${DIGEST} --repo ${GITHUB_REPOSITORY}"
+            echo '```'
+            echo ""
+            echo "### Verify the install manifests"
+            echo ""
+            echo '```bash'
+            echo "cosign verify-blob \\"
+            echo "  --certificate checksums.txt.pem \\"
+            echo "  --signature checksums.txt.sig \\"
+            echo "  --certificate-identity-regexp '^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/release\\.yml@refs/tags/.*\$' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  checksums.txt"
+            echo ""
+            echo "sha256sum -c checksums.txt"
+            echo '```'
+          } > body.md
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          # Release notes are generated from the commits, with the body above appended.
+          generate_release_notes: true
+          append_body: true
+          body_path: body.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/install.yaml
+            dist/install-namespaced-only.yaml
+            dist/checksums.txt
+            dist/checksums.txt.sig
+            dist/checksums.txt.pem
+            sboms/*.json
